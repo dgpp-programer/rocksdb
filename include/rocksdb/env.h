@@ -363,6 +363,10 @@ class Env {
     return Status::NotSupported("LoadLibrary is not implemented in this Env");
   }
 
+  virtual Status set_business_func(std::function<void()>) {
+    return Status::NotSupported("set_business_func is not implemented in this Env");
+  }
+
   // Priority for scheduling job in thread pool
   enum Priority { BOTTOM, LOW, HIGH, USER, TOTAL };
 
@@ -1579,7 +1583,7 @@ Status NewHdfsEnv(Env** hdfs_env, const std::string& fsname);
 Env* NewTimedEnv(Env* base_env);
 
 // Returns a new environment that is used for SPDK environment.
-Env* NewSpdkEnv(Env* base_env, const std::string& fsname, const std::string& confname,
+Env* NewSpdkEnv(Env* base_env, const std::string& confname,
                 const std::string& bdevname, uint64_t cache_size_in_mb);
 
 // Initializes a thread for SpdkEnv processing.

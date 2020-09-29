@@ -2076,10 +2076,12 @@ struct SharedState {
   //    (4) done
 
   long num_initialized;
-  long num_done;
+  std::atomic<long> num_done;
+  std::atomic<int> index;
   bool start;
+  Stats stats;
 
-  SharedState() : cv(&mu), perf_level(FLAGS_perf_level) { }
+  SharedState() : cv(&mu), perf_level(FLAGS_perf_level), num_done(0), index(1) { }
 };
 
 // Per-thread state for concurrent executions of the same benchmark.
@@ -2134,7 +2136,7 @@ class Duration {
 };
 
 class Benchmark {
- private:
+ public:
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<Cache> compressed_cache_;
   std::shared_ptr<const FilterPolicy> filter_policy_;
@@ -2690,6 +2692,34 @@ class Benchmark {
     fprintf(stderr, "...Verified\n");
   }
 
+  void CheckAndOpen() {
+    if (!SanityCheck()) {
+      exit(1);
+    }
+    Open(&open_options_);
+    PrintHeader();
+  }
+
+  void ParseFlags() {
+    num_ = FLAGS_num;
+    reads_ = (FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads);
+    writes_ = (FLAGS_writes < 0 ? FLAGS_num : FLAGS_writes);
+    deletes_ = (FLAGS_deletes < 0 ? FLAGS_num : FLAGS_deletes);
+    value_size_ = FLAGS_value_size;
+    key_size_ = FLAGS_key_size;
+    entries_per_batch_ = FLAGS_batch_size;
+    writes_before_delete_range_ = FLAGS_writes_before_delete_range;
+    writes_per_range_tombstone_ = FLAGS_writes_per_range_tombstone;
+    range_tombstone_width_ = FLAGS_range_tombstone_width;
+    max_num_range_tombstones_ = FLAGS_max_num_range_tombstones;
+    write_options_ = WriteOptions();
+    read_random_exp_range_ = FLAGS_read_random_exp_range;
+    if (FLAGS_sync) {
+      write_options_.sync = true;
+    }
+    write_options_.disableWAL = FLAGS_disable_wal;
+  }
+
   void Run() {
     if (!SanityCheck()) {
       exit(1);
@@ -3117,7 +3147,7 @@ class Benchmark {
 #endif  // ROCKSDB_LITE
   }
 
- private:
+ public:
   std::shared_ptr<TimestampEmulator> timestamp_emulator_;
   std::unique_ptr<port::Thread> secondary_update_thread_;
   std::atomic<int> secondary_update_stopped_{0};
@@ -3159,6 +3189,19 @@ class Benchmark {
         shared->cv.SignalAll();
       }
     }
+  }
+
+  void RunBenchmark(void (Benchmark::*method)(ThreadState*), SharedState *shared) {
+      auto index = shared->index.fetch_add(1);
+      ThreadState *thread = new ThreadState(index);
+      thread->shared = shared;
+      thread->stats.Start(index);
+      (this->*method)(thread);
+      thread->stats.Stop();
+      {
+        MutexLock l(&shared->mu);
+        shared->stats.Merge(thread->stats);
+      }
   }
 
   Stats RunBenchmark(int n, Slice name,
@@ -6824,7 +6867,7 @@ int db_bench_tool(int argc, char** argv) {
   }
 
   if (!FLAGS_spdk.empty()) {
-    FLAGS_env = rocksdb::NewSpdkEnv(rocksdb::Env::Default(), FLAGS_db, FLAGS_spdk, FLAGS_spdk_bdev, FLAGS_spdk_cache_size);
+    FLAGS_env = rocksdb::NewSpdkEnv(rocksdb::Env::Default(), FLAGS_spdk, FLAGS_spdk_bdev, FLAGS_spdk_cache_size);
     if (FLAGS_env == NULL) {
       fprintf(stderr, "Could not load SPDK blobfs - check that SPDK mkfs was run "
                       "against block device %s.\n", FLAGS_spdk_bdev.c_str());
@@ -6878,11 +6921,34 @@ int db_bench_tool(int argc, char** argv) {
   // Allocate the Benchmark off the heap, so that we can explicitly delete it
   //  before the SpdkEnv is deleted.
   rocksdb::Benchmark *benchmark = new rocksdb::Benchmark;
-  benchmark->Run();
-  delete benchmark;
+  benchmark->CheckAndOpen();
+  benchmark->ParseFlags();
 
+  // set business code
+  SharedState shared;
   if (!FLAGS_spdk.empty()) {
+    std::function<void()> func = [&](){
+      benchmark->RunBenchmark(&Benchmark::ReadRandom, &shared);
+      shared.num_done++;
+      shared.cv.SignalAll();
+    };
+    FLAGS_env->set_business_func(func);
+
+    // wait for all reactor complete
+    fprintf(stdout, "wait for bench complete........\n");
+    while (1) {
+      if (shared.num_done.load() == 31) {
+        break;
+      }
+      shared.cv.Wait();
+    }
+    fprintf(stdout, "bench complete........\n");
+    shared.stats.Report("randomread");
+    delete benchmark;
     delete FLAGS_env;
+  } else {
+    benchmark->Run();
+    delete benchmark;
   }
 
 #ifndef ROCKSDB_LITE

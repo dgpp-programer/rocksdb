@@ -37,6 +37,7 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
       immutable_db_options.create_missing_column_families;
   options.error_if_exists = immutable_db_options.error_if_exists;
   options.paranoid_checks = immutable_db_options.paranoid_checks;
+  options.warmup_readers = immutable_db_options.warmup_readers;
   options.env = immutable_db_options.env;
   options.file_system = immutable_db_options.fs;
   options.rate_limiter = immutable_db_options.rate_limiter;
@@ -1466,6 +1467,9 @@ std::unordered_map<std::string, OptionTypeInfo>
           OptionVerificationType::kNormal, false, 0}},
         {"paranoid_checks",
          {offsetof(struct DBOptions, paranoid_checks), OptionType::kBoolean,
+          OptionVerificationType::kNormal, false, 0}},
+        {"warmup_readers",
+         {offsetof(struct DBOptions, warmup_readers), OptionType::kBoolean,
           OptionVerificationType::kNormal, false, 0}},
         {"skip_log_error_on_recovery",
          {offsetof(struct DBOptions, skip_log_error_on_recovery),

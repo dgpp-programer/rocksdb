@@ -2088,6 +2088,21 @@ void VersionStorageInfo::GenerateLevelFilesBrief() {
   }
 }
 
+void Version::warmupReaders() {
+  ROCKS_LOG_INFO(info_log_, "warmupReaders start....\n");
+  for (int level = 0; level < storage_info_.num_non_empty_levels_; level++) {
+    auto level_files = &(storage_info_.level_files_brief_)[level];
+    for (size_t i = 0; i < level_files->num_files; i++) {
+      auto f = &level_files->files[i];
+      Cache::Handle* handle = nullptr;
+      table_cache_->FindTable(this->file_options_, *internal_comparator(),
+          f->file_metadata->fd, &handle, mutable_cf_options_.prefix_extractor.get(),
+          false, false, cfd_->internal_stats()->GetFileReadHist(level), false, level, true);
+    }
+  }
+  ROCKS_LOG_INFO(info_log_, "warmupReaders finished.\n");
+}
+
 void Version::PrepareApply(
     const MutableCFOptions& mutable_cf_options,
     bool update_stats) {

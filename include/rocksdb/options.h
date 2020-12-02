@@ -388,6 +388,10 @@ struct DBOptions {
   // Default: true
   bool paranoid_checks = true;
 
+  // warmup all readers when rocksdb open
+  // Default: false
+  bool warmup_readers = false;
+
   // Use the specified object to interact with the environment,
   // e.g. to read/write files, schedule background work, etc. In the near
   // future, support for doing storage operations such as read/write files

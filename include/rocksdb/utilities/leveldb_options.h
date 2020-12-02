@@ -55,6 +55,10 @@ struct LevelDBOptions {
   // Default: false
   bool paranoid_checks;
 
+  // warmup all readers when rocksdb open
+  // Default: false
+  bool warmup_readers = false;
+
   // Use the specified object to interact with the environment,
   // e.g. to read/write files, schedule background work, etc.
   // Default: Env::Default()

@@ -603,6 +603,8 @@ class Version {
   void MultiGet(const ReadOptions&, MultiGetRange* range,
                 ReadCallback* callback = nullptr, bool* is_blob = nullptr);
 
+  void warmupReaders();
+
   // Loads some stats information from files. Call without mutex held. It needs
   // to be called before applying the version to the version set.
   void PrepareApply(const MutableCFOptions& mutable_cf_options,

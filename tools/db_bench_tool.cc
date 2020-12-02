@@ -1114,6 +1114,9 @@ DEFINE_bool(mmap_write, rocksdb::Options().allow_mmap_writes,
 DEFINE_bool(use_direct_reads, rocksdb::Options().use_direct_reads,
             "Use O_DIRECT for reading data");
 
+DEFINE_bool(warmup_readers, rocksdb::Options().warmup_readers,
+            "warmup readers");
+
 DEFINE_bool(use_direct_io_for_flush_and_compaction,
             rocksdb::Options().use_direct_io_for_flush_and_compaction,
             "Use O_DIRECT for background flush and compaction writes");
@@ -3503,6 +3506,7 @@ class Benchmark {
     options.allow_mmap_reads = FLAGS_mmap_read;
     options.allow_mmap_writes = FLAGS_mmap_write;
     options.use_direct_reads = FLAGS_use_direct_reads;
+    options.warmup_readers = FLAGS_warmup_readers;
     options.use_direct_io_for_flush_and_compaction =
         FLAGS_use_direct_io_for_flush_and_compaction;
 #ifndef ROCKSDB_LITE

@@ -1544,6 +1544,12 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     sfm->ReserveDiskBuffer(max_write_buffer_size,
                            impl->immutable_db_options_.db_paths[0].path);
   }
+
+  if (s.ok() && impl->immutable_db_options_.warmup_readers) {
+    for (auto cfd : *impl->versions_->GetColumnFamilySet()) {
+      cfd->current()->warmupReaders();
+    }
+  }
 #endif  // !ROCKSDB_LITE
 
   if (s.ok()) {

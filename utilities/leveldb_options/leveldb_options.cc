@@ -22,6 +22,7 @@ LevelDBOptions::LevelDBOptions()
       create_if_missing(false),
       error_if_exists(false),
       paranoid_checks(false),
+      warmup_readers(false),
       env(Env::Default()),
       info_log(nullptr),
       write_buffer_size(4 << 20),
@@ -37,6 +38,7 @@ Options ConvertOptions(const LevelDBOptions& leveldb_options) {
   options.create_if_missing = leveldb_options.create_if_missing;
   options.error_if_exists = leveldb_options.error_if_exists;
   options.paranoid_checks = leveldb_options.paranoid_checks;
+  options.warmup_readers = leveldb_options.warmup_readers;
   options.env = leveldb_options.env;
   options.info_log.reset(leveldb_options.info_log);
   options.write_buffer_size = leveldb_options.write_buffer_size;

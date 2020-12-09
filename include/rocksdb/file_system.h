@@ -588,6 +588,10 @@ class FSRandomAccessFile {
                         Slice* result, char* scratch,
                         IODebugContext* dbg) const = 0;
 
+  virtual void ReadAsync(AsyncContext& context) const {
+    context.status = Status::NotSupported("ReadAsync not Supported.");
+  };
+
   // Readahead the file starting from offset by n bytes for caching.
   virtual IOStatus Prefetch(uint64_t /*offset*/, size_t /*n*/,
                             const IOOptions& /*options*/,

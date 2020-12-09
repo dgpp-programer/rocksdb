@@ -74,6 +74,11 @@
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
 
+extern "C" {
+#include "spdk/thread.h"
+#include "spdk_internal/thread.h"
+}
+
 #ifdef OS_WIN
 #include <io.h>  // open/close
 #endif
@@ -899,6 +904,7 @@ DEFINE_int32(table_cache_numshardbits, 4, "");
 DEFINE_string(spdk, "", "Name of SPDK configuration file");
 DEFINE_string(spdk_bdev, "", "Name of SPDK blockdev to load");
 DEFINE_uint64(spdk_cache_size, 4096, "Size of SPDK filesystem cache (in MB)");
+DEFINE_string(spdk_reactor_mask, "[0,2]", "spdk reactor mask");
 
 #ifndef ROCKSDB_LITE
 DEFINE_string(env_uri, "", "URI for registry Env lookup. Mutually exclusive"
@@ -1116,6 +1122,7 @@ DEFINE_bool(use_direct_reads, rocksdb::Options().use_direct_reads,
 
 DEFINE_bool(warmup_readers, rocksdb::Options().warmup_readers,
             "warmup readers");
+DEFINE_int32(queue_depth, 10, "parallel async reads per thread.");
 
 DEFINE_bool(use_direct_io_for_flush_and_compaction,
             rocksdb::Options().use_direct_io_for_flush_and_compaction,
@@ -1816,14 +1823,18 @@ class Stats {
   }
 
   void FinishedOps(DBWithColumnFamilies* db_with_cfh, DB* db, int64_t num_ops,
-                   enum OperationType op_type = kOthers) {
+                   enum OperationType op_type = kOthers, uint64_t start = 0) {
     if (reporter_agent_) {
       reporter_agent_->ReportFinishedOps(num_ops);
     }
     if (FLAGS_histogram) {
       uint64_t now = FLAGS_env->NowMicros();
-      uint64_t micros = now - last_op_finish_;
-
+      uint64_t micros;
+      if (start != 0) {
+        micros = now - start;
+      } else {
+        micros = now - last_op_finish_;
+      }
       if (hist_.find(op_type) == hist_.end())
       {
         auto hist_temp = std::make_shared<HistogramImpl>();
@@ -4886,6 +4897,81 @@ class Benchmark {
     return key_rand;
   }
 
+  void ReadRandomAsync(ThreadState* thread) {
+    int64_t found = 0;
+    int64_t bytes = 0;
+    int parallel = FLAGS_queue_depth;
+    int64_t key_rand = GetRandomKey(&thread->rand);
+    ReadOptions options(FLAGS_verify_checksum, true);
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    // PinnableSlice pinnable_val;
+    Duration duration(FLAGS_duration, reads_);
+
+    int64_t summit = 0;
+    int64_t complete = 0;
+
+    // TODO allocate AsyncContext from DB
+    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(parallel, sizeof(struct AsyncContext)));
+    if (!ctx) {
+      return;
+    }
+    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
+
+    for (int i = 0; i < parallel; i++) {
+      PinnableSlice pinnable_val;
+      ctx[i].options = &options;
+      ctx[i].get.cf = db_with_cfh->db->DefaultColumnFamily();
+      ctx[i].get.value = &pinnable_val;
+      ctx[i].get.callback = [&](AsyncContext& ctx_) {
+        if (!ctx_.status.ok()) {
+          fprintf(stderr, "Get returned an error: %s\n", ctx_.status.ToString().c_str());
+        } else {
+          found++;
+          bytes += ctx_.get.key->size() + ctx_.get.value->size();
+          // fprintf(stdout, "total read bytes : %ld, current key is %s. \n", bytes, ctx_.get.key->ToString(true).c_str());
+        }
+        ctx_.get.value->Reset();
+        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, ctx_.get.start_time);
+        if (!duration.Done(1)) {
+          GenerateKeyFromInt(key_rand, FLAGS_num, &key);
+          key_rand = GetRandomKey(&thread->rand);
+          ctx_.get.key = &key;
+          ctx_.get.start_time = FLAGS_env->NowMicros();
+          db_with_cfh->db->GetAsync(ctx_);
+          summit++;
+        }
+        complete++;
+      };
+
+      GenerateKeyFromInt(key_rand, FLAGS_num, &key);
+      key_rand = GetRandomKey(&thread->rand);
+      ctx[i].get.key = &key;
+      ctx[i].get.start_time = FLAGS_env->NowMicros();
+      db_with_cfh->db->GetAsync(ctx[i]);
+      summit++;
+    }
+
+    struct spdk_poller *poller;
+    struct spdk_thread *spdk_thread = spdk_get_thread();
+    while (complete != summit) {
+      TAILQ_FOREACH(poller, &spdk_thread->active_pollers, tailq) {
+        // printf("poller function : %p. \n", poller->fn);
+        poller->fn(poller->arg);
+      }
+    }
+
+    char msg[100];
+    snprintf(msg, sizeof(msg), "(%" PRIu64 " of %" PRIu64 " found)\n", found, complete);
+    thread->stats.AddBytes(bytes);
+    thread->stats.AddMessage(msg);
+    if (FLAGS_perf_level > rocksdb::PerfLevel::kDisable) {
+      thread->stats.AddMessage(std::string("PERF_CONTEXT:\n") + get_perf_context()->ToString());
+    }
+
+    free(ctx); // TODO reclaim AsyncContext
+  }
+
   void ReadRandom(ThreadState* thread) {
     int64_t read = 0;
     int64_t found = 0;
@@ -6871,7 +6957,8 @@ int db_bench_tool(int argc, char** argv) {
   }
 
   if (!FLAGS_spdk.empty()) {
-    FLAGS_env = rocksdb::NewSpdkEnv(rocksdb::Env::Default(), FLAGS_spdk, FLAGS_spdk_bdev, FLAGS_spdk_cache_size);
+    FLAGS_env = rocksdb::NewSpdkEnv(rocksdb::Env::Default(), FLAGS_spdk, FLAGS_spdk_bdev,
+        FLAGS_spdk_cache_size, FLAGS_spdk_reactor_mask);
     if (FLAGS_env == NULL) {
       fprintf(stderr, "Could not load SPDK blobfs - check that SPDK mkfs was run "
                       "against block device %s.\n", FLAGS_spdk_bdev.c_str());
@@ -6932,7 +7019,8 @@ int db_bench_tool(int argc, char** argv) {
   SharedState shared;
   if (!FLAGS_spdk.empty()) {
     std::function<void()> func = [&](){
-      benchmark->RunBenchmark(&Benchmark::ReadRandom, &shared);
+      benchmark->RunBenchmark(&Benchmark::ReadRandomAsync, &shared);
+      // benchmark->RunBenchmark(&Benchmark::SeekRandom, &shared);
       shared.num_done++;
       shared.cv.SignalAll();
     };
@@ -6941,7 +7029,7 @@ int db_bench_tool(int argc, char** argv) {
     // wait for all reactor complete
     fprintf(stdout, "wait for bench complete........\n");
     while (1) {
-      if (shared.num_done.load() == 31) {
+      if (shared.num_done.load() == FLAGS_threads) {
         break;
       }
       shared.cv.Wait();

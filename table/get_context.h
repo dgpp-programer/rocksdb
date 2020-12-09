@@ -155,7 +155,6 @@ class GetContext {
   // the merge operations encountered;
   Logger* logger_;
   Statistics* statistics_;
-
   GetState state_;
   Slice user_key_;
   PinnableSlice* pinnable_val_;
@@ -179,6 +178,7 @@ class GetContext {
   // Used for block cache tracing only. A tracing get id uniquely identifies a
   // Get or a MultiGet.
   const uint64_t tracing_get_id_;
+ friend class Version;
 };
 
 // Call this to replay a log and bring the get_context up to date. The replay

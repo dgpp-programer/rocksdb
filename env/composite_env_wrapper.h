@@ -78,6 +78,11 @@ class CompositeRandomAccessFileWrapper : public RandomAccessFile {
     IODebugContext dbg;
     return target_->Read(offset, n, io_opts, result, scratch, &dbg);
   }
+
+  void ReadAsync(AsyncContext &context) const override {
+    target_->ReadAsync(context);
+  }
+
   Status MultiRead(ReadRequest* reqs, size_t num_reqs) override {
     IOOptions io_opts;
     IODebugContext dbg;
@@ -668,6 +673,11 @@ class LegacyRandomAccessFileWrapper : public FSRandomAccessFile {
                 IODebugContext* /*dbg*/) const override {
     return status_to_io_status(target_->Read(offset, n, result, scratch));
   }
+
+  void ReadAsync(AsyncContext &context) const override {
+    target_->ReadAsync(context);
+  }
+
   IOStatus MultiRead(FSReadRequest* fs_reqs, size_t num_reqs,
                      const IOOptions& /*options*/,
                      IODebugContext* /*dbg*/) override {

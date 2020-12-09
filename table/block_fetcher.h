@@ -9,8 +9,8 @@
 
 #pragma once
 #include "memory/memory_allocator.h"
+#include "rocksdb/block_type.h"
 #include "table/block_based/block.h"
-#include "table/block_based/block_type.h"
 #include "table/format.h"
 
 namespace rocksdb {
@@ -45,7 +45,8 @@ class BlockFetcher {
                const PersistentCacheOptions& cache_options,
                MemoryAllocator* memory_allocator = nullptr,
                MemoryAllocator* memory_allocator_compressed = nullptr,
-               bool for_compaction = false)
+               bool for_compaction = false,
+               const BlockBasedTable* table = nullptr)
       : file_(file),
         prefetch_buffer_(prefetch_buffer),
         footer_(footer),
@@ -60,9 +61,17 @@ class BlockFetcher {
         cache_options_(cache_options),
         memory_allocator_(memory_allocator),
         memory_allocator_compressed_(memory_allocator_compressed),
-        for_compaction_(for_compaction) {}
+        for_compaction_(for_compaction),
+        table_(table) {}
 
   Status ReadBlockContents();
+
+  template <typename TBlocklike>
+  void ReadBlockContentsAsync(AsyncContext& context,
+      CachableEntry<TBlocklike>* block_entry);
+
+  void ReadBlockContentsCallback(AsyncContext& context);
+
   CompressionType get_compression_type() const { return compression_type_; }
 
  private:
@@ -92,6 +101,7 @@ class BlockFetcher {
   bool got_from_prefetch_buffer_ = false;
   rocksdb::CompressionType compression_type_;
   bool for_compaction_ = false;
+  const BlockBasedTable* table_;
 
   // return true if found
   bool TryGetUncompressBlockFromPersistentCache();
@@ -105,5 +115,6 @@ class BlockFetcher {
   void InsertCompressedBlockToPersistentCacheIfNeeded();
   void InsertUncompressedBlockToPersistentCacheIfNeeded();
   void CheckBlockChecksum();
+  void ReadBlockContentsDone(AsyncContext& context);
 };
 }  // namespace rocksdb

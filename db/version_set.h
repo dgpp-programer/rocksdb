@@ -600,6 +600,9 @@ class Version {
            SequenceNumber* seq = nullptr, ReadCallback* callback = nullptr,
            bool* is_blob = nullptr, bool do_merge = true);
 
+  void GetAsync(AsyncContext& context);
+  void GetAsyncDone(AsyncContext& context);
+
   void MultiGet(const ReadOptions&, MultiGetRange* range,
                 ReadCallback* callback = nullptr, bool* is_blob = nullptr);
 
@@ -689,6 +692,8 @@ class Version {
   FileSystem* fs_;
   friend class ReactiveVersionSet;
   friend class VersionSet;
+  friend class BlockBasedTable;
+  friend class BinarySearchIndexReader;
 
   const InternalKeyComparator* internal_comparator() const {
     return storage_info_.internal_comparator_;
@@ -721,6 +726,10 @@ class Version {
   // first.
   void UpdateFilesByCompactionPri();
 
+  void IterateNextFile(AsyncContext& context);
+
+  void GetAsyncCallback(AsyncContext& context);
+
   ColumnFamilyData* cfd_;  // ColumnFamilyData to which this Version belongs
   Logger* info_log_;
   Statistics* db_statistics_;
@@ -747,6 +756,94 @@ class Version {
   // No copying allowed
   Version(const Version&) = delete;
   void operator=(const Version&) = delete;
+};
+
+// Class to help choose the next file to search for the particular key.
+// Searches and returns files level by level.
+// We can search level-by-level since entries never hop across
+// levels. Therefore we are guaranteed that if we find data
+// in a smaller level, later levels are irrelevant (unless we
+// are MergeInProgress).
+class FilePicker {
+ public:
+  FilePicker(std::vector<FileMetaData*>* files, const Slice& user_key,
+             const Slice& ikey, autovector<LevelFilesBrief>* file_levels,
+             unsigned int num_levels, FileIndexer* file_indexer,
+             const Comparator* user_comparator,
+             const InternalKeyComparator* internal_comparator)
+      : num_levels_(num_levels),
+        curr_level_(static_cast<unsigned int>(-1)),
+        returned_file_level_(static_cast<unsigned int>(-1)),
+        hit_file_level_(static_cast<unsigned int>(-1)),
+        search_left_bound_(0),
+        search_right_bound_(FileIndexer::kLevelMaxIndex),
+#ifndef NDEBUG
+        files_(files),
+#endif
+        level_files_brief_(file_levels),
+        is_hit_file_last_in_level_(false),
+        curr_file_level_(nullptr),
+        user_key_(user_key),
+        ikey_(ikey),
+        file_indexer_(file_indexer),
+        user_comparator_(user_comparator),
+        internal_comparator_(internal_comparator) {
+#ifdef NDEBUG
+    (void)files;
+#endif
+    // Setup member variables to search first level.
+    search_ended_ = !PrepareNextLevel();
+    if (!search_ended_) {
+      // Prefetch Level 0 table data to avoid cache miss if possible.
+      for (unsigned int i = 0; i < (*level_files_brief_)[0].num_files; ++i) {
+        auto* r = (*level_files_brief_)[0].files[i].fd.table_reader;
+        if (r) {
+          r->Prepare(ikey);
+        }
+      }
+    }
+  }
+
+  // Setup local variables to search next level.
+  // Returns false if there are no more levels to search.
+  bool PrepareNextLevel();
+
+  FdWithKeyRange* GetNextFile();
+
+  int GetCurrentLevel() const { return curr_level_; }
+
+  // getter for current file level
+  // for GET_HIT_L0, GET_HIT_L1 & GET_HIT_L2_AND_UP counts
+  unsigned int GetHitFileLevel() { return hit_file_level_; }
+
+  // Returns true if the most recent "hit file" (i.e., one returned by
+  // GetNextFile()) is at the last index in its level.
+  bool IsHitFileLastInLevel() { return is_hit_file_last_in_level_; }
+
+ private:
+  unsigned int num_levels_;
+  unsigned int curr_level_;
+  unsigned int returned_file_level_;
+  unsigned int hit_file_level_;
+  int32_t search_left_bound_;
+  int32_t search_right_bound_;
+#ifndef NDEBUG
+  std::vector<FileMetaData*>* files_;
+#endif
+  autovector<LevelFilesBrief>* level_files_brief_;
+  bool search_ended_;
+  bool is_hit_file_last_in_level_;
+  LevelFilesBrief* curr_file_level_;
+  unsigned int curr_index_in_curr_level_;
+  unsigned int start_index_in_curr_level_;
+  Slice user_key_;
+  Slice ikey_;
+  FileIndexer* file_indexer_;
+  const Comparator* user_comparator_;
+  const InternalKeyComparator* internal_comparator_;
+#ifndef NDEBUG
+  FdWithKeyRange* prev_file_;
+#endif
 };
 
 struct ObsoleteFileInfo {

@@ -25,6 +25,7 @@
 #include <vector>
 #include "rocksdb/status.h"
 #include "rocksdb/thread_status.h"
+#include "rocksdb/async_context.h"
 
 #ifdef _WIN32
 // Windows API macro interference
@@ -636,6 +637,10 @@ class RandomAccessFile {
   // If Direct I/O enabled, offset, n, and scratch should be aligned properly.
   virtual Status Read(uint64_t offset, size_t n, Slice* result,
                       char* scratch) const = 0;
+
+  virtual void ReadAsync(AsyncContext &context) const {
+    context.status = Status::NotSupported("ReadAsync not supported.");
+  };
 
   // Readahead the file starting from offset by n bytes for caching.
   virtual Status Prefetch(uint64_t /*offset*/, size_t /*n*/) {
@@ -1410,6 +1415,11 @@ class RandomAccessFileWrapper : public RandomAccessFile {
               char* scratch) const override {
     return target_->Read(offset, n, result, scratch);
   }
+
+  void ReadAsync(AsyncContext &context) const override {
+    return target_->ReadAsync(context);
+  }
+
   Status MultiRead(ReadRequest* reqs, size_t num_reqs) override {
     return target_->MultiRead(reqs, num_reqs);
   }
@@ -1584,7 +1594,8 @@ Env* NewTimedEnv(Env* base_env);
 
 // Returns a new environment that is used for SPDK environment.
 Env* NewSpdkEnv(Env* base_env, const std::string& confname,
-                const std::string& bdevname, uint64_t cache_size_in_mb);
+    const std::string& bdevname, uint64_t cache_size_in_mb,
+    const std::string& reactor_mask);
 
 // Initializes a thread for SpdkEnv processing.
 void SpdkInitializeThread(void);

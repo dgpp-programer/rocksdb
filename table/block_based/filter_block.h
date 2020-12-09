@@ -76,7 +76,7 @@ class FilterBlockBuilder {
 // KeyMayMatch and PrefixMayMatch would trigger filter checking
 //
 // BlockBased/Full FilterBlock would be called in the same way.
-class FilterBlockReader {
+class FilterBlockReader : public AsyncCallback {
  public:
   FilterBlockReader() = default;
   virtual ~FilterBlockReader() = default;
@@ -117,6 +117,8 @@ class FilterBlockReader {
       }
     }
   }
+
+  virtual void KeyMayMatchAsync(AsyncContext &context) = 0;
 
   /**
    * no_io and const_ikey_ptr here means the same as in KeyMayMatch

@@ -1502,6 +1502,63 @@ Status DBImpl::Get(const ReadOptions& read_options,
   return GetImpl(read_options, key, get_impl_options);
 }
 
+void DBImpl::GetAsyncCallBack(AsyncContext& context) {
+  ReturnAndCleanupSuperVersion(context.version.cfd, context.version.sv);
+  RecordTick(stats_, NUMBER_KEYS_READ);
+  size_t size = 0;
+  if (context.status.ok()) {
+    size = context.get.value->size();
+    RecordTick(stats_, BYTES_READ, size);
+    PERF_COUNTER_ADD(get_read_bytes, size);
+  }
+  RecordInHistogram(stats_, BYTES_PER_READ, size);
+  context.get.callback(context);
+}
+
+void DBImpl::GetAsync(AsyncContext& context) {
+  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.get.cf);
+  context.version.cfd = cfh->cfd();
+  context.version.sv = GetAndRefSuperVersion(context.version.cfd);
+  ReadOptions* read_options = context.options;
+  SequenceNumber snapshot = last_seq_same_as_publish_seq_
+      ? versions_->LastSequence() : versions_->LastPublishedSequence();
+  context.version.merge_context.reset(new MergeContext());
+  context.version.max_covering_tombstone_seq = 0;
+  context.version.key_info.lkey.reset(new LookupKey(*context.get.key, snapshot, read_options->timestamp));
+  context.version.key_info.internal_key = context.version.key_info.lkey->internal_key();
+  context.version.key_info.user_key = context.version.key_info.lkey->user_key();
+
+  bool skip_memtable = (read_options->read_tier == kPersistedTier &&
+      has_unpersisted_data_.load(std::memory_order_relaxed));
+  bool done = false;
+  if (!skip_memtable) {
+    if (context.version.sv->mem->Get(*context.version.key_info.lkey, context.get.value->GetSelf(), &context.status,
+        context.version.merge_context.get(), &context.version.max_covering_tombstone_seq, *read_options)) {
+      done = true;
+      context.get.value->PinSelf();
+      RecordTick(stats_, MEMTABLE_HIT);
+    } else if ((context.status.ok() || context.status.IsMergeInProgress()) &&
+      context.version.sv->imm->Get(*context.version.key_info.lkey, context.get.value->GetSelf(), &context.status,
+            context.version.merge_context.get(), &context.version.max_covering_tombstone_seq, *read_options)) {
+      done = true;
+      context.get.value->PinSelf();
+      RecordTick(stats_, MEMTABLE_HIT);
+    }
+    if (!done && !context.status.ok() && !context.status.IsMergeInProgress()) {
+      ReturnAndCleanupSuperVersion(context.version.cfd, context.version.sv);
+      return;
+    }
+  }
+
+  if (!done) {
+    context.version.db_impl = this;
+    context.version.sv->current->GetAsync(context);
+    RecordTick(stats_, MEMTABLE_MISS);
+  } else {
+    GetAsyncCallBack(context);
+  }
+}
+
 Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
                        GetImplOptions get_impl_options) {
   assert(get_impl_options.value != nullptr ||

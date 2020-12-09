@@ -172,6 +172,78 @@ bool PartitionedFilterBlockReader::KeyMayMatch(
                   &FullFilterBlockReader::KeyMayMatch);
 }
 
+void PartitionedFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
+  auto t = const_cast<BlockBasedTable*>(table());
+  if (UNLIKELY(!context.status.ok())) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);
+  }
+  if (UNLIKELY(context.reader.retrieve_block.block->GetValue()->size() == 0)) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);
+  }
+
+  auto filter_handle = GetFilterPartitionHandle(*context.reader.retrieve_block.block,
+      context.version.key_info.internal_key);
+  if (UNLIKELY(filter_handle.size() == 0)) {  // key is out of range
+    context.reader.key_may_match = false;
+    return t->GetAsyncCallback(context);
+  }
+
+  CachableEntry<ParsedFullFilterBlock> filter_partition_block;
+
+  // TODO make this async
+  auto no_io = context.options->read_tier == kBlockCacheTier;
+  context.status = GetFilterPartitionBlock(nullptr /* prefetch_buffer */, filter_handle,
+      no_io, context.version.getCtx.get(), context.reader.lookup_context.get(),
+      &filter_partition_block);
+  if (UNLIKELY(!context.status.ok())) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);
+  }
+
+  FilterFunction filter_function = &FullFilterBlockReader::KeyMayMatch;
+  Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
+  size_t ts_sz = table_->get_rep()->internal_comparator.user_comparator()->timestamp_size();
+  Slice user_key_without_ts = StripTimestampFromUserKey(user_key, ts_sz);
+  FullFilterBlockReader filter_partition(table(), std::move(filter_partition_block));
+  const Slice* const const_ikey_ptr = &context.version.key_info.internal_key;
+
+  // TODO make this async
+  context.reader.key_may_match = (filter_partition.*filter_function)(
+      user_key_without_ts, context.reader.prefix_extractor.get(),
+      context.reader.block_offset, no_io, const_ikey_ptr, context.version.getCtx.get(),
+      context.reader.lookup_context.get());
+  return;
+}
+
+void PartitionedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
+  assert(context.reader.block_offset == kNotValid);
+  if (!whole_key_filtering()) {
+    context.reader.key_may_match = true;
+    auto t = const_cast<BlockBasedTable*>(table());
+    return t->GetAsyncCallback(context);
+  }
+
+  context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
+  if (!filter_block_.IsEmpty()) {
+    context.reader.retrieve_block.block->SetUnownedValue(filter_block_.GetValue());
+    context.status = Status::OK();
+    return RetrieveBlockDone(context);
+  }
+
+  PERF_TIMER_GUARD(read_filter_block_nanos);
+  const BlockBasedTable::Rep* const rep = table_->get_rep();
+  assert(rep);
+  // TODO make this async
+  context.status = table_->RetrieveBlock(nullptr, *context.options, rep->filter_handle,
+      UncompressionDict::GetEmptyDict(), context.reader.retrieve_block.block.get(),
+      BlockType::kFilter, context.version.getCtx.get(), context.reader.lookup_context.get(),
+      /* for_compaction */ false, cache_filter_blocks());
+
+  RetrieveBlockDone(context);
+}
+
 bool PartitionedFilterBlockReader::PrefixMayMatch(
     const Slice& prefix, const SliceTransform* prefix_extractor,
     uint64_t block_offset, const bool no_io, const Slice* const const_ikey_ptr,

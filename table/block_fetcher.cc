@@ -11,6 +11,7 @@
 
 #include <cinttypes>
 #include <string>
+#include <type_traits>
 
 #include "logging/logging.h"
 #include "memory/memory_allocator.h"
@@ -193,6 +194,129 @@ inline void BlockFetcher::GetBlockContents() {
   contents_->is_raw_block = true;
 #endif
 }
+
+void BlockFetcher::ReadBlockContentsDone(AsyncContext& context) {
+  if (block_type_ == BlockType::kFilter) {
+    CachableEntry<ParsedFullFilterBlock> *block;
+    return context.reader.read_contents_no_cache
+        ? table_->ReadBlockContentsDone(context, block)
+        : table_->ReadBlockContentsCallback(context, block);
+  } else {
+    CachableEntry<Block> *block;
+    return context.reader.read_contents_no_cache
+        ? table_->ReadBlockContentsDone(context, block)
+        : table_->ReadBlockContentsCallback(context, block);
+  }
+}
+
+void BlockFetcher::ReadBlockContentsCallback(AsyncContext& context) {
+  PERF_COUNTER_ADD(block_read_count, 1);
+  switch (block_type_) {
+    case BlockType::kFilter:
+      PERF_COUNTER_ADD(filter_block_read_count, 1);
+      break;
+    case BlockType::kCompressionDictionary:
+      PERF_COUNTER_ADD(compression_dict_block_read_count, 1);
+      break;
+    case BlockType::kIndex:
+      PERF_COUNTER_ADD(index_block_read_count, 1);
+      break;
+    default:
+      break;
+  }
+  PERF_COUNTER_ADD(block_read_byte, block_size_ + kBlockTrailerSize);
+  if (!context.status.ok()) {
+    return ReadBlockContentsDone(context);
+  }
+  if (slice_.size() != block_size_ + kBlockTrailerSize) {
+    context.status = Status::Corruption("truncated block read from " +
+        file_->file_name() + " offset " + ToString(handle_.offset()) + ", expected " +
+        ToString(block_size_ + kBlockTrailerSize) + " bytes, got " + ToString(slice_.size()));
+    return ReadBlockContentsDone(context);
+  }
+  CheckBlockChecksum();
+  if (context.status.ok()) {
+    InsertCompressedBlockToPersistentCacheIfNeeded();
+  } else {
+    return ReadBlockContentsDone(context);
+  }
+  PERF_TIMER_GUARD(block_decompress_time);
+  compression_type_ = get_block_compression_type(slice_.data(), block_size_);
+  if (do_uncompress_ && compression_type_ != kNoCompression) {
+    // compressed page, uncompress, update cache
+    UncompressionContext ucontext(compression_type_);
+    UncompressionInfo info(ucontext, uncompression_dict_, compression_type_);
+    context.status = UncompressBlockContents(info, slice_.data(), block_size_,
+        contents_, footer_.version(), ioptions_, memory_allocator_);
+        compression_type_ = kNoCompression;
+  } else {
+    GetBlockContents();
+  }
+  InsertUncompressedBlockToPersistentCacheIfNeeded();
+  return ReadBlockContentsDone(context);
+}
+
+template <typename TBlocklike>
+void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context,
+    CachableEntry<TBlocklike>* block_entry) {
+  block_size_ = static_cast<size_t>(handle_.size());
+  if (TryGetUncompressBlockFromPersistentCache()) {
+    compression_type_ = kNoCompression;
+#ifndef NDEBUG
+    contents_->is_raw_block = true;
+#endif  // NDEBUG
+    context.status = Status::OK();
+    return context.reader.read_contents_no_cache
+        ? table_->ReadBlockContentsDone(context, block_entry)
+        : table_->ReadBlockContentsCallback(context, block_entry);
+  }
+  if (TryGetFromPrefetchBuffer()) {
+    if (!context.status.ok()) {
+      return context.reader.read_contents_no_cache
+          ? table_->ReadBlockContentsDone(context, block_entry)
+          : table_->ReadBlockContentsCallback(context, block_entry);
+    }
+  } else if (!TryGetCompressedBlockFromPersistentCache()) {
+    PrepareBufferForBlockFromFile();
+    context.get.offset = handle_.offset();
+    context.get.length = block_size_ + kBlockTrailerSize;
+    context.get.result = &slice_;
+    context.get.scratch = used_buf_;
+    context.get.read_complete = &BlockFetcher::ReadBlockContentsCallback;
+    return file_->ReadAsync(context);
+  }
+
+  PERF_TIMER_GUARD(block_decompress_time);
+  compression_type_ = get_block_compression_type(slice_.data(), block_size_);
+
+  if (do_uncompress_ && compression_type_ != kNoCompression) {
+    // compressed page, uncompress, update cache
+    UncompressionContext ucontext(compression_type_);
+    UncompressionInfo info(ucontext, uncompression_dict_, compression_type_);
+    status_ = UncompressBlockContents(info, slice_.data(), block_size_,
+        contents_, footer_.version(), ioptions_, memory_allocator_);
+    compression_type_ = kNoCompression;
+  } else {
+    GetBlockContents();
+  }
+
+  InsertUncompressedBlockToPersistentCacheIfNeeded();
+  return context.reader.read_contents_no_cache
+      ? table_->ReadBlockContentsDone(context, block_entry)
+      : table_->ReadBlockContentsCallback(context, block_entry);
+}
+
+template void BlockFetcher::ReadBlockContentsAsync<Block>(
+    AsyncContext &context, CachableEntry<Block>* block_entry);
+
+template void BlockFetcher::ReadBlockContentsAsync<ParsedFullFilterBlock>(
+    AsyncContext &context, CachableEntry<ParsedFullFilterBlock>* block_entry);
+
+template void BlockFetcher::ReadBlockContentsAsync<UncompressionDict>(
+    AsyncContext &context, CachableEntry<UncompressionDict>* block_entry);
+
+template void BlockFetcher::ReadBlockContentsAsync<BlockContents>(
+    AsyncContext &context, CachableEntry<BlockContents>* block_entry);
 
 Status BlockFetcher::ReadBlockContents() {
   block_size_ = static_cast<size_t>(handle_.size());

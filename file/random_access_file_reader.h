@@ -105,6 +105,8 @@ class RandomAccessFileReader {
   Status Read(uint64_t offset, size_t n, Slice* result, char* scratch,
               bool for_compaction = false) const;
 
+  void ReadAsync(AsyncContext& context) const;
+
   Status MultiRead(FSReadRequest* reqs, size_t num_reqs) const;
 
   Status Prefetch(uint64_t offset, size_t n) const {

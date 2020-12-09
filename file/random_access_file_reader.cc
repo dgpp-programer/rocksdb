@@ -146,6 +146,10 @@ Status RandomAccessFileReader::Read(uint64_t offset, size_t n, Slice* result,
   return s;
 }
 
+void RandomAccessFileReader::ReadAsync(AsyncContext& context) const {
+  file_->ReadAsync(context);
+}
+
 Status RandomAccessFileReader::MultiRead(FSReadRequest* read_reqs,
                                          size_t num_reqs) const {
   Status s;

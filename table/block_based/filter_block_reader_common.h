@@ -29,6 +29,8 @@ class FilterBlockReaderCommon : public FilterBlockReader {
   }
 
  protected:
+  const BlockBasedTable* table_;
+  CachableEntry<TBlocklike> filter_block_;
   static Status ReadFilterBlock(const BlockBasedTable* table,
                                 FilePrefetchBuffer* prefetch_buffer,
                                 const ReadOptions& read_options, bool use_cache,
@@ -46,10 +48,6 @@ class FilterBlockReaderCommon : public FilterBlockReader {
                               CachableEntry<TBlocklike>* filter_block) const;
 
   size_t ApproximateFilterBlockMemoryUsage() const;
-
- private:
-  const BlockBasedTable* table_;
-  CachableEntry<TBlocklike> filter_block_;
 };
 
 }  // namespace rocksdb

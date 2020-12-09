@@ -103,6 +103,67 @@ FullFilterBlockReader::FullFilterBlockReader(
   }
 }
 
+void FullFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
+  auto t = const_cast<BlockBasedTable*>(table());
+  if (!context.status.ok()) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);
+  }
+  assert(context.reader.retrieve_block.full_filter_block->GetValue());
+  FilterBitsReader* const filter_bits_reader =
+      context.reader.retrieve_block.full_filter_block->GetValue()->filter_bits_reader();
+
+  if (filter_bits_reader) {
+    Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
+    size_t ts_sz = table()->get_rep()->internal_comparator.user_comparator()->timestamp_size();
+    Slice entry = StripTimestampFromUserKey(user_key, ts_sz);
+
+    if (filter_bits_reader->MayMatch(entry)) {
+      PERF_COUNTER_ADD(bloom_sst_hit_count, 1);
+      context.reader.key_may_match = true;
+    } else {
+      PERF_COUNTER_ADD(bloom_sst_miss_count, 1);
+      context.reader.key_may_match = false;
+    }
+  } else {
+    // remain the same with block_based filter
+    context.reader.key_may_match = true;
+  }
+  auto entry = context.reader.retrieve_block.full_filter_block.release();
+  delete entry;
+  t->GetAsyncCallback(context);
+}
+
+void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
+  assert(context.reader.block_offset == kNotValid);
+  if (!whole_key_filtering()) {
+    context.reader.key_may_match = true;
+    auto t = const_cast<BlockBasedTable*>(table());
+    return t->GetAsyncCallback(context);
+  }
+
+  context.reader.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+  if (!filter_block_.IsEmpty()) { // TODO test
+    context.reader.retrieve_block.full_filter_block->SetUnownedValue(filter_block_.GetValue());
+    context.status = Status::OK();
+    return RetrieveBlockDone(context);
+  }
+
+  PERF_TIMER_GUARD(read_filter_block_nanos);
+  const BlockBasedTable::Rep* const rep = table_->get_rep();
+  assert(rep);
+
+  context.reader.async_cb = this;
+  context.reader.block_type = BlockType::kFilter;
+  context.reader.prefetch_buffer = nullptr;
+  context.reader.handle = const_cast<BlockHandle*>(&rep->filter_handle);
+  context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+      &UncompressionDict::GetEmptyDict());
+  context.reader.for_compaction = false;
+  table_->RetrieveBlockAsync(context, context.reader.retrieve_block.full_filter_block.get(),
+      cache_filter_blocks());
+}
+
 bool FullFilterBlockReader::KeyMayMatch(
     const Slice& key, const SliceTransform* /*prefix_extractor*/,
     uint64_t block_offset, const bool no_io,

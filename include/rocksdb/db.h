@@ -412,6 +412,10 @@ class DB {
     return Get(options, DefaultColumnFamily(), key, value);
   }
 
+  virtual void GetAsync(AsyncContext& context) {
+    context.status = Status::NotSupported("Async Get not support.");
+  }
+
   // Returns all the merge operands corresponding to the key. If the
   // number of merge operands in DB is greater than
   // merge_operands_options.expected_max_number_of_operands

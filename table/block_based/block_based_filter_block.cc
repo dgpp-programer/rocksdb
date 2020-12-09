@@ -208,6 +208,80 @@ bool BlockBasedFilterBlockReader::KeyMayMatch(
   return MayMatch(key, block_offset, no_io, get_context, lookup_context);
 }
 
+void BlockBasedFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
+  auto t = const_cast<BlockBasedTable*>(table());
+  if (!context.status.ok()) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);;
+  }
+  assert(context.reader.retrieve_block.contents->GetValue());
+  const char* data = nullptr;
+  const char* offset = nullptr;
+  size_t num = 0;
+  size_t base_lg = 0;
+  if (!ParseFieldsFromBlock(*context.reader.retrieve_block.contents->GetValue(),
+      &data, &offset, &num, &base_lg)) {
+    // Errors are treated as potential matches
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);;
+  }
+  const uint64_t index = context.reader.block_offset >> base_lg;
+  if (index < num) {
+    const uint32_t start = DecodeFixed32(offset + index * 4);
+    const uint32_t limit = DecodeFixed32(offset + index * 4 + 4);
+    if (start <= limit && limit <= (uint32_t)(offset - data)) {
+      Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
+      size_t ts_sz = table()->get_rep()->internal_comparator.user_comparator()->timestamp_size();
+      Slice entry = StripTimestampFromUserKey(user_key, ts_sz);
+
+      const Slice filter = Slice(data + start, limit - start);
+      const FilterPolicy* const policy = table()->get_rep()->filter_policy;
+      context.reader.key_may_match = policy->KeyMayMatch(entry, filter);
+      if (context.reader.key_may_match) {
+        PERF_COUNTER_ADD(bloom_sst_hit_count, 1);
+      } else {
+        PERF_COUNTER_ADD(bloom_sst_miss_count, 1);
+      }
+    } else if (start == limit) {
+      // Empty filters do not match any entries
+      context.reader.key_may_match = false;
+    }
+    return t->GetAsyncCallback(context);
+  }
+  context.reader.key_may_match = true;
+  t->GetAsyncCallback(context);
+}
+
+void BlockBasedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
+  assert(context.reader.block_offset != kNotValid);
+  if (!whole_key_filtering()) {
+    context.reader.key_may_match = true;
+    auto t = const_cast<BlockBasedTable*>(table());
+    return t->GetAsyncCallback(context);
+  }
+
+  context.reader.retrieve_block.contents.reset(new CachableEntry<BlockContents>());
+  if (!filter_block_.IsEmpty()) {
+    context.reader.retrieve_block.contents->SetUnownedValue(filter_block_.GetValue());
+    context.status = Status::OK();
+    return RetrieveBlockDone(context);
+  }
+
+  PERF_TIMER_GUARD(read_filter_block_nanos);
+  const BlockBasedTable::Rep* const rep = table_->get_rep();
+  assert(rep);
+
+  context.reader.async_cb = this;
+  context.reader.block_type = BlockType::kFilter;
+  context.reader.prefetch_buffer = nullptr;
+  context.reader.handle = const_cast<BlockHandle*>(&rep->filter_handle);
+  context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+      &UncompressionDict::GetEmptyDict());
+  context.reader.for_compaction = false;
+  table_->RetrieveBlockAsync(context, context.reader.retrieve_block.contents.get(),
+      cache_filter_blocks());
+}
+
 bool BlockBasedFilterBlockReader::PrefixMayMatch(
     const Slice& prefix, const SliceTransform* /* prefix_extractor */,
     uint64_t block_offset, const bool no_io,

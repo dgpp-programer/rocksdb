@@ -13,6 +13,7 @@
 #include "db/range_tombstone_fragmenter.h"
 #include "db/snapshot_impl.h"
 #include "db/version_edit.h"
+#include "db/version_set.h"
 #include "file/filename.h"
 #include "file/random_access_file_reader.h"
 #include "monitoring/perf_context_imp.h"
@@ -349,6 +350,56 @@ bool TableCache::GetFromRowCache(const Slice& user_key, IterKey& row_cache_key,
   return found;
 }
 #endif  // ROCKSDB_LITE
+
+void TableCache::GetAsyncCallback(AsyncContext& context) {
+  if (context.cache.handle != nullptr) {
+    ReleaseHandle(context.cache.handle);
+  }
+  context.version.sv->current->GetAsyncDone(context);
+}
+
+void TableCache::GetAsync(AsyncContext& context,
+    const InternalKeyComparator& internal_comparator,
+    const FileMetaData& file_meta,
+    HistogramImpl* file_read_hist, int level) {
+  auto& fd = file_meta.fd;
+
+  TableReader* t = fd.table_reader;
+  context.cache.handle = nullptr;
+  if (context.status.ok()) {
+    if (t == nullptr) {
+      context.status = FindTable(
+          file_options_, internal_comparator, fd, &context.cache.handle,
+          context.reader.prefix_extractor.get(),
+          context.options->read_tier == kBlockCacheTier /* no_io */,
+          true /* record_read_stats */, file_read_hist,
+          context.reader.skip_filters, level);
+      if (context.status.ok()) {
+        t = GetTableReaderFromHandle(context.cache.handle);
+      }
+    }
+    SequenceNumber* max_covering_tombstone_seq = context.version.getCtx->max_covering_tombstone_seq();
+    if (context.status.ok() && max_covering_tombstone_seq != nullptr &&
+        !context.options->ignore_range_deletions) {
+      std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter(
+          t->NewRangeTombstoneIterator(*context.options));
+      if (range_del_iter != nullptr) {
+        *max_covering_tombstone_seq = std::max(
+            *max_covering_tombstone_seq,
+            range_del_iter->MaxCoveringTombstoneSeqnum(
+                ExtractUserKey(context.version.key_info.internal_key)));
+      }
+    }
+    if (context.status.ok()) {
+      context.cache.table_cache = this;
+      return t->GetAsync(context);
+    } else if (context.options->read_tier == kBlockCacheTier && context.status.IsIncomplete()) {
+      context.version.getCtx->MarkKeyMayExist();
+      context.status = Status::OK();
+    }
+  }
+  GetAsyncCallback(context);
+}
 
 Status TableCache::Get(const ReadOptions& options,
                        const InternalKeyComparator& internal_comparator,

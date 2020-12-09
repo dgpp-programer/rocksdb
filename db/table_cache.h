@@ -75,6 +75,11 @@ class TableCache {
       bool skip_filters, int level, const InternalKey* smallest_compaction_key,
       const InternalKey* largest_compaction_key);
 
+  void GetAsync(AsyncContext& context,
+      const InternalKeyComparator& internal_comparator,
+      const FileMetaData& file_meta,
+      HistogramImpl* file_read_hist, int level);
+
   // If a seek to internal key "k" in specified file finds an entry,
   // call get_context->SaveValue() repeatedly until
   // it returns false. As a side effect, it will insert the TableReader
@@ -190,6 +195,8 @@ class TableCache {
       immortal_tables_ = true;
     }
   }
+
+  void GetAsyncCallback(AsyncContext& context);
 
  private:
   // Build a table reader

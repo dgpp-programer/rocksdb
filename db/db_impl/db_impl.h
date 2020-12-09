@@ -164,6 +164,9 @@ class DBImpl : public DB {
                      ColumnFamilyHandle* column_family, const Slice& key,
                      PinnableSlice* value) override;
 
+  using DB::GetAsync;
+  virtual void GetAsync(AsyncContext& context) override;
+
   using DB::GetMergeOperands;
   Status GetMergeOperands(const ReadOptions& options,
                           ColumnFamilyHandle* column_family, const Slice& key,
@@ -1119,6 +1122,7 @@ class DBImpl : public DB {
 
  private:
   friend class DB;
+  friend class Version;
   friend class ErrorHandler;
   friend class InternalStats;
   friend class PessimisticTransaction;
@@ -1727,6 +1731,8 @@ class DBImpl : public DB {
       autovector<KeyContext*, MultiGetContext::MAX_BATCH_SIZE>* sorted_keys,
       SuperVersion* sv, SequenceNumber snap_seqnum, ReadCallback* callback,
       bool* is_blob_index);
+
+  void GetAsyncCallBack(AsyncContext& context);
 
   // table_cache_ provides its own synchronization
   std::shared_ptr<Cache> table_cache_;

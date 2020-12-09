@@ -25,9 +25,9 @@
 #include "rocksdb/statistics.h"
 #include "rocksdb/status.h"
 #include "rocksdb/table.h"
+#include "rocksdb/block_type.h"
 #include "table/block_based/block.h"
 #include "table/block_based/block_based_table_factory.h"
-#include "table/block_based/block_type.h"
 #include "table/block_based/cachable_entry.h"
 #include "table/block_based/filter_block.h"
 #include "table/block_based/uncompression_dict_reader.h"
@@ -73,7 +73,7 @@ typedef std::vector<std::pair<std::string, std::string>> KVPairBlock;
 // memory, and finally search that record within the block. Of course, to avoid
 // frequent reads of the same block, we introduced the block cache to keep the
 // loaded blocks in the memory.
-class BlockBasedTable : public TableReader {
+class BlockBasedTable : public TableReader, public AsyncCallback{
  public:
   static const std::string kFilterBlockPrefix;
   static const std::string kFullFilterBlockPrefix;
@@ -146,6 +146,9 @@ class BlockBasedTable : public TableReader {
              GetContext* get_context, const SliceTransform* prefix_extractor,
              bool skip_filters = false) override;
 
+  void GetAsync(AsyncContext& context) override;
+  void RetrieveBlockDone(AsyncContext& context) override;
+
   void MultiGet(const ReadOptions& readOptions,
                 const MultiGetContext::Range* mget_range,
                 const SliceTransform* prefix_extractor,
@@ -199,7 +202,7 @@ class BlockBasedTable : public TableReader {
 
   // IndexReader is the interface that provides the functionality for index
   // access.
-  class IndexReader {
+  class IndexReader : public AsyncCallback {
    public:
     virtual ~IndexReader() = default;
 
@@ -214,6 +217,10 @@ class BlockBasedTable : public TableReader {
         const ReadOptions& read_options, bool disable_prefix_seek,
         IndexBlockIter* iter, GetContext* get_context,
         BlockCacheLookupContext* lookup_context) = 0;
+
+    virtual void NewIteratorAsync(AsyncContext &context) = 0;
+    virtual void IterateNextIndexKey(AsyncContext& context) = 0;
+    virtual void NewDataBlockIteratorCallback(AsyncContext& context) = 0;
 
     // Report an approximation of how much memory has been used other than
     // memory that was allocated in block cache.
@@ -252,13 +259,13 @@ class BlockBasedTable : public TableReader {
                                    CachableEntry<Block>& block,
                                    TBlockIter* input_iter, Status s) const;
 
+  void NewDataBlockIteratorAsync(AsyncContext &context) const;
+
   class PartitionedIndexIteratorState;
 
   template <typename TBlocklike>
   friend class FilterBlockReaderCommon;
-
   friend class PartitionIndexReader;
-
   friend class UncompressionDictReader;
 
  protected:
@@ -271,6 +278,10 @@ class BlockBasedTable : public TableReader {
 
  private:
   friend class MockedBlockBasedTable;
+  friend class BlockBasedFilterBlockReader;
+  friend class FullFilterBlockReader;
+  friend class BinarySearchIndexReader;
+  friend class BlockFetcher;
   static std::atomic<uint64_t> next_cache_key_id_;
   BlockCacheTracer* const block_cache_tracer_;
 
@@ -307,6 +318,17 @@ class BlockBasedTable : public TableReader {
       GetContext* get_context, BlockCacheLookupContext* lookup_context,
       BlockContents* contents) const;
 
+  template <typename TBlocklike>
+  void MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
+      CachableEntry<TBlocklike>* block_entry, BlockContents* contents) const;
+
+  template <typename TBlocklike>
+  void MaybeReadBlockAndLoadToCacheCallback(AsyncContext &context,
+      CachableEntry<TBlocklike>* block_entry) const;
+
+  template <typename TBlocklike>
+  void ReadBlockContentsCallback(AsyncContext &context, CachableEntry<TBlocklike>* block_entry) const;
+
   // Similar to the above, with one crucial difference: it will retrieve the
   // block from the file even if there are no caches configured (assuming the
   // read options allow I/O).
@@ -318,6 +340,18 @@ class BlockBasedTable : public TableReader {
                        BlockType block_type, GetContext* get_context,
                        BlockCacheLookupContext* lookup_context,
                        bool for_compaction, bool use_cache) const;
+
+  template <typename TBlocklike>
+  void ReadBlockContentsDone(AsyncContext &context,
+      CachableEntry<TBlocklike>* entry) const;
+
+  template <typename TBlocklike>
+  void RetrieveBlockCallback(AsyncContext &context,
+      CachableEntry<TBlocklike>* block_entry) const;
+
+  template <typename TBlocklike>
+  void RetrieveBlockAsync(AsyncContext &context,
+      CachableEntry<TBlocklike>* block_entry, bool use_cache) const;
 
   void RetrieveMultipleBlocks(
       const ReadOptions& options, const MultiGetRange* batch,
@@ -460,6 +494,8 @@ class BlockBasedTable : public TableReader {
   Status DumpDataBlocks(WritableFile* out_file);
   void DumpKeyValue(const Slice& key, const Slice& value,
                     WritableFile* out_file);
+
+  void GetAsyncCallback(AsyncContext& context);
 
   // A cumulative data block file read in MultiGet lower than this size will
   // use a stack buffer

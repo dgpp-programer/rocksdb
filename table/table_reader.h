@@ -100,6 +100,10 @@ class TableReader {
                      const SliceTransform* prefix_extractor,
                      bool skip_filters = false) = 0;
 
+  virtual void GetAsync(AsyncContext& context) {
+    context.status = Status::NotSupported("GetAsync not supported yet.");
+  }
+
   virtual void MultiGet(const ReadOptions& readOptions,
                         const MultiGetContext::Range* mget_range,
                         const SliceTransform* prefix_extractor,

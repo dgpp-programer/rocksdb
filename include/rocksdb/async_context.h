@@ -52,6 +52,12 @@ public:
   virtual void RetrieveBlockDone(AsyncContext& context) = 0;
 };
 
+class IteratorCallback {
+public:
+  virtual ~IteratorCallback() = default;
+  virtual void IterateNextDone(AsyncContext&) {}
+};
+
 typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
 
 // TODO make sure all pointer refer to no function variable
@@ -95,6 +101,7 @@ struct AsyncContext {
     bool skip_filters;
     bool for_compaction;
     bool read_contents_no_cache;
+    bool second_level; // used by PartitionedFilterBlockReader
     uint64_t block_offset;
     BlockType block_type;
     FilePrefetchBuffer* prefetch_buffer;
@@ -109,6 +116,7 @@ struct AsyncContext {
     std::unique_ptr<BlockFetcher> block_fetcher;
     std::unique_ptr<BlockContents> raw_block_contents;
     AsyncCallback* async_cb;
+    IteratorCallback* iter_cb;
     union {
       std::unique_ptr<CachableEntry<Generic>> cache_entry;
       std::unique_ptr<CachableEntry<BlockContents>> contents; // BlockBasedFilterBlockReader

@@ -53,6 +53,10 @@ class InternalIteratorBase : public Cleanable {
   // the call; after the seek, status() indicates only the error (if any) that
   // happened during the seek, not any past errors.
   virtual void Seek(const Slice& target) = 0;
+  virtual void SeekAsync(AsyncContext& context) {
+    Seek(context.version.key_info.internal_key);
+    context.reader.iter_cb->IterateNextDone(context);
+  }
 
   // Position at the first key in the source that at or before target
   // The iterator is Valid() after this call iff the source contains
@@ -63,6 +67,10 @@ class InternalIteratorBase : public Cleanable {
   // true iff the iterator was not positioned at the last entry in the source.
   // REQUIRES: Valid()
   virtual void Next() = 0;
+  virtual void NextAsync(AsyncContext& context) {
+    Next();
+    context.reader.iter_cb->IterateNextDone(context);
+  }
 
   // Moves to the next entry in the source, and return result. Iterator
   // implementation should override this method to help methods inline better,

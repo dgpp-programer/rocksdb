@@ -143,7 +143,7 @@ void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   }
 
   context.reader.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
-  if (!filter_block_.IsEmpty()) { // TODO test
+  if (!filter_block_.IsEmpty()) { // TODO chenxu14 test cache not find
     context.reader.retrieve_block.full_filter_block->SetUnownedValue(filter_block_.GetValue());
     context.status = Status::OK();
     return RetrieveBlockDone(context);

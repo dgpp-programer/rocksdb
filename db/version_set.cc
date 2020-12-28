@@ -1750,6 +1750,8 @@ void Version::GetAsyncDone(AsyncContext& ctx_) {
           "Encounter unexpected blob index. Please open DB with "
           "rocksdb::blob_db::BlobDB instead.");
       return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+    default :
+      return IterateNextFile(ctx_);
   }
 }
 

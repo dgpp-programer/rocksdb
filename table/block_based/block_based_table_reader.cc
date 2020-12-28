@@ -259,6 +259,74 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     assert(table_ != nullptr);
   }
 
+  void NewIteratorAsync(AsyncContext &context) override {
+    context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
+    if (!index_block_.IsEmpty()) { // TODO chenxu14 test cache not find
+      context.reader.retrieve_block.block->SetUnownedValue(index_block_.GetValue());
+      context.status = Status::OK();
+      return RetrieveBlockDone(context);
+    }
+    PERF_TIMER_GUARD(read_index_block_nanos);
+    const BlockBasedTable::Rep* const rep = table()->get_rep();
+    assert(rep != nullptr);
+    context.reader.async_cb = this;
+    context.reader.block_type = BlockType::kIndex;
+    context.reader.prefetch_buffer = nullptr;
+    context.reader.handle = const_cast<BlockHandle*>(&rep->footer.index_handle());
+    context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+        &UncompressionDict::GetEmptyDict());
+    context.reader.for_compaction = false;
+    table_->RetrieveBlockAsync(context, context.reader.retrieve_block.block.get(),
+        cache_index_blocks());
+  }
+
+  void NewDataBlockIteratorCallback(AsyncContext& context) {
+    if (context.options->read_tier == kBlockCacheTier &&
+        context.reader.data_iter->status().IsIncomplete()) {
+      context.version.getCtx->MarkKeyMayExist();
+      return ReaderCallback(context);
+    }
+    if (!context.reader.data_iter->status().ok()) {
+      context.status = context.reader.data_iter->status();
+      return ReaderCallback(context);
+    }
+
+    auto rep_t = table()->get_rep();
+    bool may_exist = context.reader.data_iter->SeekForGet(context.version.key_info.internal_key);
+    if (!may_exist && rep_t->internal_comparator.user_comparator()->timestamp_size() == 0) {
+      return ReaderCallback(context);
+    } else {
+      for (; context.reader.data_iter->Valid(); context.reader.data_iter->Next()) {
+        ParsedInternalKey parsed_key;
+        if (!ParseInternalKey(context.reader.data_iter->key(), &parsed_key)) {
+          context.status = Status::Corruption(Slice());
+        }
+        bool matched = false;  // if such user key mathced a key in SST
+        if (!context.version.getCtx->SaveValue(parsed_key, context.reader.data_iter->value(), &matched,
+            context.reader.data_iter->IsValuePinned() ? context.reader.data_iter.get() : nullptr)) {
+          auto filter = !context.reader.skip_filters ? rep_t->filter.get() : nullptr;
+          if (matched && filter != nullptr && !filter->IsBlockBased()) {
+            RecordTick(rep_t->ioptions.statistics, BLOOM_FILTER_FULL_TRUE_POSITIVE);
+            PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_true_positive, 1, rep_t->level);
+          }
+          return ReaderCallback(context);
+        }
+      }
+      context.status = context.reader.index_iter->status();
+    }
+
+    context.reader.iter_cb = this;
+    context.reader.index_iter->NextAsync(context);
+  }
+
+  void IterateNextDone(AsyncContext& context) {
+    if (context.reader.index_iter->Valid()) {
+      return IterateNextIndexKey(context);
+    } else {
+      return ReaderCallback(context);
+    }
+  }
+
  protected:
   static Status ReadIndexBlock(const BlockBasedTable* table,
                                FilePrefetchBuffer* prefetch_buffer,
@@ -309,6 +377,70 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     return index_block_.GetOwnValue()
                ? index_block_.GetValue()->ApproximateMemoryUsage()
                : 0;
+  }
+
+  void ReaderCallback(AsyncContext& context) {
+    if (context.status.ok()) {
+      context.status = context.reader.index_iter->status();
+    }
+    context.cache.table_cache->GetAsyncCallback(context);
+  }
+
+  void IterateNextIndexKey(AsyncContext& context) override {
+    auto rep_t = table()->get_rep();
+    FilterBlockReader* const filter = !context.reader.skip_filters ? rep_t->filter.get() : nullptr;
+
+    IndexValue v = context.reader.index_iter->value();
+    // TODO async this if use BlockBasedFilterBlockReader
+    if (filter != nullptr && filter->IsBlockBased() == true) {
+      const bool no_io = context.options->read_tier == kBlockCacheTier;
+      context.reader.key_may_match =
+          filter->KeyMayMatch(ExtractUserKeyAndStripTimestamp(context.version.key_info.internal_key,
+              rep_t->internal_comparator.user_comparator()->timestamp_size()),
+          context.reader.prefix_extractor.get(), v.handle.offset(), no_io,
+          /*const_ikey_ptr=*/nullptr, context.version.getCtx.get(),
+          context.reader.lookup_context.get());
+      if (!context.reader.key_may_match) {
+        RecordTick(rep_t->ioptions.statistics, BLOOM_FILTER_USEFUL);
+        PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_t->level);
+        return ReaderCallback(context);
+      }
+    }
+    if (!v.first_internal_key.empty() && !context.reader.skip_filters &&
+        UserComparatorWrapper(rep_t->internal_comparator.user_comparator()).Compare(
+        ExtractUserKey(context.version.key_info.internal_key),
+        ExtractUserKey(v.first_internal_key)) < 0) {
+      return ReaderCallback(context);
+    }
+
+    PERF_TIMER_GUARD(new_table_block_iter_nanos);
+    CachableEntry<UncompressionDict> uncompression_dict;
+    if (table_->get_rep()->uncompression_dict_reader) {
+      const bool no_io = (context.options->read_tier == kBlockCacheTier);
+      // TODO async this
+      context.status = table_->get_rep()->uncompression_dict_reader->GetOrReadUncompressionDictionary(
+          context.reader.prefetch_buffer, no_io, context.version.getCtx.get(),
+      context.reader.lookup_context.get(), &uncompression_dict);
+      if (!context.status.ok()) {
+        context.reader.data_iter.reset(new DataBlockIter());
+        context.reader.data_iter->Invalidate(context.status);
+        return table_->get_rep()->index_reader->NewDataBlockIteratorCallback(context);
+      }
+    }
+
+    context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
+    context.reader.handle = &v.handle;
+    context.reader.block_type = BlockType::kData;
+    context.reader.prefetch_buffer = nullptr;
+    context.reader.for_compaction = false;
+    context.reader.async_cb = const_cast<BlockBasedTable*>(table_);
+    context.reader.lookup_context.reset(new BlockCacheLookupContext(
+        TableReaderCaller::kUserGet, context.version.getCtx->get_tracing_get_id(),
+        /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+    context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+        uncompression_dict.GetValue() ? uncompression_dict.GetValue()
+            : &UncompressionDict::GetEmptyDict());
+    table_->RetrieveBlockAsync(context, context.reader.retrieve_block.block.get(), true);
   }
 
   const BlockBasedTable* table_;
@@ -395,20 +527,33 @@ class PartitionIndexReader : public BlockBasedTable::IndexReaderCommon {
     return Status::OK();
   }
 
-  void IterateNextIndexKey(AsyncContext& context) override {
-    context.status = Status::NotSupported("PartitionIndexReader not supported this yet.");
-  }
-
   void RetrieveBlockDone(AsyncContext& context) override {
-    context.status = Status::NotSupported("PartitionIndexReader not supported this yet.");
-  }
-
-  void NewIteratorAsync(AsyncContext &context) override {
-    context.status = Status::NotSupported("PartitionIndexReader not supported this yet.");
-  }
-
-  void NewDataBlockIteratorCallback(AsyncContext& context) override {
-    context.status = Status::NotSupported("PartitionIndexReader not supported this yet.");
+    if (!context.status.ok()) {
+      context.reader.index_iter.reset(NewErrorInternalIterator<IndexValue>(context.status));
+    } else {
+      InternalIteratorBase<IndexValue>* it = nullptr;
+      if (!partition_map_.empty()) { // TODO chenxu14 test
+        it = NewTwoLevelIterator(
+            new BlockBasedTable::PartitionedIndexIteratorState(table(), &partition_map_),
+            context.reader.retrieve_block.block->GetValue()->NewIndexIterator(
+                internal_comparator(), internal_comparator()->user_comparator(),
+                nullptr, nullptr, true, index_has_first_key(), index_key_includes_seq(),
+                index_value_is_full()));
+      } else {
+        it = new BlockBasedTableIterator<IndexBlockIter, IndexValue>(
+            table(), &context, *internal_comparator(),
+            context.reader.retrieve_block.block->GetValue()->NewIndexIterator(
+                internal_comparator(), internal_comparator()->user_comparator(),
+                nullptr, nullptr, true, index_has_first_key(), index_key_includes_seq(),
+				index_value_is_full()),
+            false, true, /* prefix_extractor */ nullptr, BlockType::kIndex);
+      }
+      assert(it != nullptr);
+      context.reader.retrieve_block.block->TransferTo(it);
+      context.reader.index_iter.reset(it);
+    }
+    context.reader.iter_cb = this;
+    context.reader.index_iter->SeekAsync(context);
   }
 
   // return a two-level iterator: first level is on the partition index
@@ -601,96 +746,6 @@ class BinarySearchIndexReader : public BlockBasedTable::IndexReaderCommon {
     return Status::OK();
   }
 
-  void ReaderCallback(AsyncContext& context) {
-    if (context.status.ok()) {
-      context.status = context.reader.index_iter->status();
-    }
-    context.cache.table_cache->GetAsyncCallback(context);
-  }
-
-  void NewDataBlockIteratorCallback(AsyncContext& context) {
-    if (context.options->read_tier == kBlockCacheTier &&
-        context.reader.data_iter->status().IsIncomplete()) {
-      context.version.getCtx->MarkKeyMayExist();
-      return ReaderCallback(context);
-    }
-    if (!context.reader.data_iter->status().ok()) {
-      context.status = context.reader.data_iter->status();
-      return ReaderCallback(context);
-    }
-
-    auto rep_t = table()->get_rep();
-    bool may_exist = context.reader.data_iter->SeekForGet(context.version.key_info.internal_key);
-    if (!may_exist && rep_t->internal_comparator.user_comparator()->timestamp_size() == 0) {
-      return ReaderCallback(context);
-    } else {
-      for (; context.reader.data_iter->Valid(); context.reader.data_iter->Next()) {
-        ParsedInternalKey parsed_key;
-        if (!ParseInternalKey(context.reader.data_iter->key(), &parsed_key)) {
-          context.status = Status::Corruption(Slice());
-        }
-        bool matched = false;  // if such user key mathced a key in SST
-        if (!context.version.getCtx->SaveValue(parsed_key, context.reader.data_iter->value(), &matched,
-            context.reader.data_iter->IsValuePinned() ? context.reader.data_iter.get() : nullptr)) {
-          auto filter = !context.reader.skip_filters ? rep_t->filter.get() : nullptr;
-          if (matched && filter != nullptr && !filter->IsBlockBased()) {
-            RecordTick(rep_t->ioptions.statistics, BLOOM_FILTER_FULL_TRUE_POSITIVE);
-            PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_true_positive, 1, rep_t->level);
-          }
-          return ReaderCallback(context);
-        }
-      }
-      context.status = context.reader.index_iter->status();
-    }
-
-    context.reader.index_iter->Next();
-    if (context.reader.index_iter->Valid()) {
-      return IterateNextIndexKey(context);
-    } else {
-      return ReaderCallback(context);
-    }
-  }
-
-  void IterateNextIndexKey(AsyncContext& context) override {
-    auto rep_t = table()->get_rep();
-    FilterBlockReader* const filter = !context.reader.skip_filters ? rep_t->filter.get() : nullptr;
-    const bool no_io = context.options->read_tier == kBlockCacheTier;
-
-    IndexValue v = context.reader.index_iter->value();
-    // TODO async this
-    if (filter != nullptr && filter->IsBlockBased() == true) {
-      context.reader.key_may_match =
-          filter->KeyMayMatch(ExtractUserKeyAndStripTimestamp(context.version.key_info.internal_key,
-              rep_t->internal_comparator.user_comparator()->timestamp_size()),
-          context.reader.prefix_extractor.get(), v.handle.offset(), no_io,
-          /*const_ikey_ptr=*/nullptr, context.version.getCtx.get(),
-          context.reader.lookup_context.get());
-    }
-
-    if (!context.reader.key_may_match) {
-      RecordTick(rep_t->ioptions.statistics, BLOOM_FILTER_USEFUL);
-      PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_t->level);
-      return ReaderCallback(context);
-    }
-
-    if (!v.first_internal_key.empty() && !context.reader.skip_filters &&
-        UserComparatorWrapper(rep_t->internal_comparator.user_comparator()).Compare(
-        ExtractUserKey(context.version.key_info.internal_key),
-        ExtractUserKey(v.first_internal_key)) < 0) {
-      return ReaderCallback(context);
-    }
-
-    // context.reader.data_iter.reset(new DataBlockIter());
-    context.reader.handle = &v.handle;
-    context.reader.block_type = BlockType::kData;
-    context.reader.prefetch_buffer = nullptr;
-    context.reader.for_compaction = false;
-    context.reader.lookup_context.reset(new BlockCacheLookupContext(
-        TableReaderCaller::kUserGet, context.version.getCtx->get_tracing_get_id(),
-        /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
-    table()->NewDataBlockIteratorAsync(context);
-  }
-
   void RetrieveBlockDone(AsyncContext& context) override {
     if (!context.status.ok()) {
       context.reader.index_iter.reset(NewErrorInternalIterator<IndexValue>(context.status));
@@ -703,40 +758,11 @@ class BinarySearchIndexReader : public BlockBasedTable::IndexReaderCommon {
           index_value_is_full());
 
       assert(it != nullptr);
-      context.reader.retrieve_block.block->TransferTo(it);
+      context.reader.retrieve_block.block->TransferTo(it); // release block when it closed
       context.reader.index_iter.reset(it);
     }
-
-    context.reader.index_iter->Seek(context.version.key_info.internal_key);
-    if (context.reader.index_iter->Valid()) {
-      IterateNextIndexKey(context);
-    } else {
-      ReaderCallback(context);
-    }
-  }
-
-  void NewIteratorAsync(AsyncContext &context) override {
-    context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
-
-    if (!index_block_.IsEmpty()) { // TODO test
-      context.reader.retrieve_block.block->SetUnownedValue(index_block_.GetValue());
-      context.status = Status::OK();
-      return RetrieveBlockDone(context);
-    }
-
-    PERF_TIMER_GUARD(read_index_block_nanos);
-    const BlockBasedTable::Rep* const rep = table()->get_rep();
-    assert(rep != nullptr);
-
-    context.reader.async_cb = this;
-    context.reader.block_type = BlockType::kIndex;
-    context.reader.prefetch_buffer = nullptr;
-    context.reader.handle = const_cast<BlockHandle*>(&rep->footer.index_handle());
-    context.reader.uncompression_dict = const_cast<UncompressionDict*>(
-        &UncompressionDict::GetEmptyDict());
-    context.reader.for_compaction = false;
-    table_->RetrieveBlockAsync(context, context.reader.retrieve_block.block.get(),
-      cache_index_blocks());
+    context.reader.iter_cb = this;
+    context.reader.index_iter->SeekAsync(context);
   }
 
   InternalIteratorBase<IndexValue>* NewIterator(
@@ -919,20 +945,23 @@ class HashIndexReader : public BlockBasedTable::IndexReaderCommon {
     return it;
   }
 
-  void IterateNextIndexKey(AsyncContext& context) override {
-    context.status = Status::NotSupported("HashIndexReader not supported this yet.");
-  }
-
   void RetrieveBlockDone(AsyncContext& context) override {
-    context.status = Status::NotSupported("HashIndexReader not supported this yet.");
-  }
-
-  void NewIteratorAsync(AsyncContext &context) override {
-    context.status = Status::NotSupported("HashIndexReader not supported this yet.");
-  }
-
-  void NewDataBlockIteratorCallback(AsyncContext& context) override {
-    context.status = Status::NotSupported("HashIndexReader not supported this yet.");
+    if (!context.status.ok()) {
+      context.reader.index_iter.reset(NewErrorInternalIterator<IndexValue>(context.status));
+    } else {
+      auto disable_prefix_seek = PrefixExtractorChanged(
+          table_->get_rep()->table_properties.get(), context.reader.prefix_extractor.get());
+      auto total_order_seek = context.options->total_order_seek || disable_prefix_seek;
+      auto it = context.reader.retrieve_block.block->GetValue()->NewIndexIterator(
+          internal_comparator(), internal_comparator()->user_comparator(), nullptr,
+          nullptr, total_order_seek, index_has_first_key(), index_key_includes_seq(),
+          index_value_is_full(), false, prefix_index_.get());
+      assert(it != nullptr);
+      context.reader.retrieve_block.block->TransferTo(it); // release block when it closed
+      context.reader.index_iter.reset(it);
+    }
+    context.reader.iter_cb = this;
+    context.reader.index_iter->SeekAsync(context);
   }
 
   size_t ApproximateMemoryUsage() const override {
@@ -2132,9 +2161,7 @@ void BlockBasedTable::NewDataBlockIteratorAsync(AsyncContext &context) const {
     }
   }
 
-  // TODO conflict with index block? call retrieve_block.block.reset multi times
   context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
-  context.reader.async_cb = const_cast<BlockBasedTable*>(this);
   context.reader.uncompression_dict = const_cast<UncompressionDict*>(
       uncompression_dict.GetValue() ? uncompression_dict.GetValue()
           : &UncompressionDict::GetEmptyDict());
@@ -2770,7 +2797,7 @@ void BlockBasedTable::RetrieveBlockDone(AsyncContext& context) {
   } else {
     context.reader.data_iter->SetCacheHandle(block->GetCacheHandle());
   }
-  block->TransferTo(context.reader.data_iter.get());
+  block->TransferTo(context.reader.data_iter.get()); // release block when data_iter closed
   get_rep()->index_reader->NewDataBlockIteratorCallback(context);
 }
 
@@ -3207,8 +3234,90 @@ void BlockBasedTableIterator<TBlockIter, TValue>::Seek(const Slice& target) {
 }
 
 template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsync(AsyncContext&) {
+  target_ = &context_->version.key_info.internal_key;
+  SeekAsyncImpl();
+}
+
+template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::SeekToFirst() {
   SeekImpl(nullptr);
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForwardCallback() {
+  CheckOutOfBound();
+  if (is_at_first_key_from_index_) {
+    // in order not to call MaterializeCurrentBlock in value()
+    return MaterializeCurrentBlockAsync();
+  }
+  context_->reader.iter_cb->IterateNextDone(*context_);
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncCallback() {
+  if (target_) {
+    block_iter_.Seek(*target_);
+  } else {
+    block_iter_.SeekToFirst();
+  }
+  return FindKeyForwardAsync();
+}
+
+// Method call this should specify target_
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncImpl() {
+  is_out_of_bound_ = false;
+  is_at_first_key_from_index_ = false;
+  if (target_ && !CheckPrefixMayMatch(*target_)) { // TODO chenxu14 async prefix bloom filter
+    ResetDataIter();
+    return context_->reader.iter_cb->IterateNextDone(*context_);
+  }
+  bool need_seek_index = true;
+  if (block_iter_points_to_real_block_ && block_iter_.Valid()) {
+    prev_block_offset_ = index_iter_->value().handle.offset();
+    if (target_) {
+      if (user_comparator_.Compare(ExtractUserKey(*target_), block_iter_.user_key()) > 0
+          && user_comparator_.Compare(ExtractUserKey(*target_), index_iter_->user_key()) < 0) {
+        need_seek_index = false;
+      }
+    }
+  }
+  if (need_seek_index) {
+    if (target_) {
+      index_iter_->Seek(*target_);
+    } else {
+      index_iter_->SeekToFirst();
+    }
+    if (!index_iter_->Valid()) {
+      ResetDataIter();
+      return context_->reader.iter_cb->IterateNextDone(*context_);
+    }
+  }
+
+  IndexValue v = index_iter_->value();
+  const bool same_block = block_iter_points_to_real_block_
+      && v.handle.offset() == prev_block_offset_;
+  if (!v.first_internal_key.empty() && !same_block &&
+      (!target_ || icomp_.Compare(*target_, v.first_internal_key) <= 0) &&
+      read_options_.read_tier != kBlockCacheTier) {
+    is_at_first_key_from_index_ = true;
+    ResetDataIter();
+    return FindKeyForwardCallback();
+  } else {
+    if (!same_block) {
+      InitDataBlockCallback = &BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncCallback;
+      return InitDataBlockAsync();
+    } else {
+      CheckDataBlockWithinUpperBound();
+      if (target_) {
+        block_iter_.Seek(*target_);
+      } else {
+        block_iter_.SeekToFirst();
+      }
+      return FindKeyForwardAsync();
+    }
+  }
 }
 
 template <class TBlockIter, typename TValue>
@@ -3382,6 +3491,26 @@ void BlockBasedTableIterator<TBlockIter, TValue>::Next() {
 }
 
 template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlockDone() {
+  if (!materialize_current_block) {
+    return context_->reader.iter_cb->IterateNextDone(*context_);
+  }
+  assert(block_iter_points_to_real_block_);
+  block_iter_.Next();
+  FindKeyForwardAsync();
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::NextAsync(AsyncContext&) {
+  if (is_at_first_key_from_index_) {
+    return MaterializeCurrentBlockAsync();
+  }
+  assert(block_iter_points_to_real_block_);
+  block_iter_.Next();
+  FindKeyForwardAsync();
+}
+
+template <class TBlockIter, typename TValue>
 bool BlockBasedTableIterator<TBlockIter, TValue>::NextAndGetResult(
     IterateResult* result) {
   Next();
@@ -3414,12 +3543,120 @@ void BlockBasedTableIterator<TBlockIter, TValue>::Prev() {
 }
 
 template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::RetrieveBlockDone(AsyncContext& context) {
+  if (!context.status.ok()) {
+    assert(context.reader.retrieve_block.block->IsEmpty());
+    block_iter_.Invalidate(context.status);
+    block_iter_points_to_real_block_ = true;
+    CheckDataBlockWithinUpperBound();
+    return InitDataBlockCallback(this);
+  }
+
+  auto block = context.reader.retrieve_block.block.get();
+  auto rep_ = table_->get_rep();
+  assert(block->GetValue() != nullptr);
+  const bool block_contents_pinned = block->IsCached() ||
+      (!block->GetValue()->own_bytes() && rep_->immortal_table);
+  table_->InitBlockIterator<TBlockIter>(rep_, block->GetValue(), &block_iter_,
+      block_contents_pinned);
+
+  if (!block->IsCached()) {
+    if (!context.options->fill_cache && rep_->cache_key_prefix_size != 0) {
+      Cache* const block_cache = rep_->table_options.block_cache.get();
+      Cache::Handle* cache_handle = nullptr;
+      const size_t kExtraCacheKeyPrefix = kMaxVarint64Length * 4 + 1;
+      char cache_key[kExtraCacheKeyPrefix + kMaxVarint64Length];
+      memset(cache_key, 0, kExtraCacheKeyPrefix + kMaxVarint64Length);
+      assert(rep_->cache_key_prefix_size != 0);
+      assert(rep_->cache_key_prefix_size <= kExtraCacheKeyPrefix);
+      memcpy(cache_key, rep_->cache_key_prefix, rep_->cache_key_prefix_size);
+      char* end = EncodeVarint64(cache_key + kExtraCacheKeyPrefix, table_->next_cache_key_id_++);
+      assert(end - cache_key <= static_cast<int>(kExtraCacheKeyPrefix + kMaxVarint64Length));
+      const Slice unique_key(cache_key, static_cast<size_t>(end - cache_key));
+      context.status = block_cache->Insert(unique_key, nullptr,
+          block->GetValue()->ApproximateMemoryUsage(), nullptr, &cache_handle);
+      if (context.status.ok()) {
+        assert(cache_handle != nullptr);
+        block_iter_.RegisterCleanup(&ForceReleaseCachedEntry, block_cache, cache_handle);
+      }
+    }
+  } else {
+    block_iter_.SetCacheHandle(block->GetCacheHandle());
+  }
+  block->TransferTo(&block_iter_);
+  block_iter_points_to_real_block_ = true;
+  CheckDataBlockWithinUpperBound();
+  return InitDataBlockCallback(this);
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::InitDataBlockAsync() {
+  BlockHandle data_block_handle = index_iter_->value().handle;
+  if (!block_iter_points_to_real_block_ || data_block_handle.offset() != prev_block_offset_
+      || block_iter_.status().IsIncomplete()) {
+    if (block_iter_points_to_real_block_) {
+      ResetDataIter();
+    }
+    auto* rep = table_->get_rep();
+    if (lookup_context_.caller != TableReaderCaller::kCompaction) {
+      if (read_options_.readahead_size == 0) {
+        num_file_reads_++;
+        if (num_file_reads_ > BlockBasedTable::kMinNumFileReadsToStartAutoReadahead) {
+          if (!rep->file->use_direct_io() && (data_block_handle.offset() +
+              static_cast<size_t>(block_size(data_block_handle)) > readahead_limit_)) {
+            rep->file->Prefetch(data_block_handle.offset(), readahead_size_);
+            readahead_limit_ = static_cast<size_t>(data_block_handle.offset() + readahead_size_);
+            readahead_size_ = std::min(BlockBasedTable::kMaxAutoReadaheadSize, readahead_size_ * 2);
+          } else if (rep->file->use_direct_io() && !prefetch_buffer_) {
+            rep->CreateFilePrefetchBuffer(BlockBasedTable::kInitAutoReadaheadSize,
+                BlockBasedTable::kMaxAutoReadaheadSize, &prefetch_buffer_);
+          }
+        }
+      } else if (!prefetch_buffer_) {
+        rep->CreateFilePrefetchBuffer(read_options_.readahead_size,
+            read_options_.readahead_size, &prefetch_buffer_);
+      }
+    } else if (!prefetch_buffer_) {
+      rep->CreateFilePrefetchBuffer(compaction_readahead_size_,
+          compaction_readahead_size_, &prefetch_buffer_);
+    }
+    PERF_TIMER_GUARD(new_table_block_iter_nanos);
+    if (!context_->status.ok()) {
+      block_iter_.Invalidate(context_->status);
+      return InitDataBlockCallback(this);
+    }
+    CachableEntry<UncompressionDict> uncompression_dict;
+    if (table_->get_rep()->uncompression_dict_reader) {
+      const bool no_io = (context_->options->read_tier == kBlockCacheTier);
+      // TODO chenxu14 async this
+      context_->status = table_->get_rep()->uncompression_dict_reader->GetOrReadUncompressionDictionary(
+          context_->reader.prefetch_buffer, no_io, context_->version.getCtx.get(),
+          context_->reader.lookup_context.get(), &uncompression_dict);
+      if (!context_->status.ok()) {
+        block_iter_.Invalidate(context_->status);
+        return InitDataBlockCallback(this);
+      }
+    }
+
+    context_->reader.retrieve_block.block.reset(new CachableEntry<Block>());
+    context_->reader.handle = &data_block_handle;
+    context_->reader.block_type = block_type_;
+    context_->reader.prefetch_buffer = prefetch_buffer_.get();
+    context_->reader.for_compaction = (context_->reader.lookup_context->caller == TableReaderCaller::kCompaction);
+    context_->reader.async_cb = this;
+    context_->reader.uncompression_dict = const_cast<UncompressionDict*>(
+        uncompression_dict.GetValue() ? uncompression_dict.GetValue()
+            : &UncompressionDict::GetEmptyDict());
+    table_->RetrieveBlockAsync(*context_, context_->reader.retrieve_block.block.get(), true);
+  }
+}
+
+// Method call this should specify InitDataBlockCallback to encapsule the callback logic
+template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::InitDataBlock() {
   BlockHandle data_block_handle = index_iter_->value().handle;
-  if (!block_iter_points_to_real_block_ ||
-      data_block_handle.offset() != prev_block_offset_ ||
-      // if previous attempt of reading the block missed cache, try again
-      block_iter_.status().IsIncomplete()) {
+  if (!block_iter_points_to_real_block_ || data_block_handle.offset() != prev_block_offset_
+      || block_iter_.status().IsIncomplete()) {
     if (block_iter_points_to_real_block_) {
       ResetDataIter();
     }
@@ -3485,6 +3722,32 @@ void BlockBasedTableIterator<TBlockIter, TValue>::InitDataBlock() {
 }
 
 template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlockCallback() {
+  assert(block_iter_points_to_real_block_);
+  block_iter_.SeekToFirst();
+
+  if (!block_iter_.Valid() || icomp_.Compare(block_iter_.key(),
+      index_iter_->value().first_internal_key) != 0) {
+    block_iter_.Invalidate(Status::Corruption(
+        "first key in index doesn't match first key in block"));
+    materialize_current_block = false;
+  } else {
+    materialize_current_block = true;
+  }
+  MaterializeCurrentBlockDone();
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlockAsync() {
+  assert(is_at_first_key_from_index_);
+  assert(!block_iter_points_to_real_block_);
+  assert(index_iter_->Valid());
+  is_at_first_key_from_index_ = false;
+  InitDataBlockCallback = &BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlockCallback;
+  InitDataBlockAsync();
+}
+
+template <class TBlockIter, typename TValue>
 bool BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlock() {
   assert(is_at_first_key_from_index_);
   assert(!block_iter_points_to_real_block_);
@@ -3508,6 +3771,17 @@ bool BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlock() {
 }
 
 template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForwardAsync() {
+  assert(!is_out_of_bound_);
+  assert(block_iter_points_to_real_block_);
+  if (!block_iter_.Valid()) {
+    FindBlockForwardAsync();
+  } else {
+    FindKeyForwardCallback();
+  }
+}
+
+template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForward() {
   // This method's code is kept short to make it likely to be inlined.
 
@@ -3523,6 +3797,46 @@ void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForward() {
   } else {
     // This is the fast path that avoids a function call.
   }
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardCallback() {
+  block_iter_.SeekToFirst();
+  if (!block_iter_.Valid()) {
+    FindBlockForwardAsync();
+  } else {
+    FindKeyForwardCallback();
+  }
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardAsync() {
+  if (!block_iter_.status().ok()) {
+    return FindKeyForwardCallback();
+  }
+  const bool next_block_is_out_of_bound = read_options_.iterate_upper_bound != nullptr
+      && block_iter_points_to_real_block_ && !data_block_within_upper_bound_;
+  assert(!next_block_is_out_of_bound || user_comparator_.Compare(
+      *read_options_.iterate_upper_bound, index_iter_->user_key()) <= 0);
+  ResetDataIter();
+  index_iter_->Next();
+  if (next_block_is_out_of_bound) {
+    if (index_iter_->Valid()) {
+      is_out_of_bound_ = true;
+    }
+    return FindKeyForwardCallback();
+  }
+  if (!index_iter_->Valid()) {
+    return FindKeyForwardCallback();
+  }
+  IndexValue v = index_iter_->value();
+  if (!v.first_internal_key.empty() && read_options_.read_tier != kBlockCacheTier) {
+    is_at_first_key_from_index_ = true;
+    return FindKeyForwardCallback();
+  }
+
+  InitDataBlockCallback = &BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardCallback;
+  InitDataBlockAsync();
 }
 
 template <class TBlockIter, typename TValue>
@@ -3751,7 +4065,7 @@ void BlockBasedTable::GetAsync(AsyncContext& context) {
     context.reader.block_offset = kNotValid;
     filter->KeyMayMatchAsync(context);
   } else {
-    // TODO make this async
+    // TODO chenxu14 make this async if use prefix bloom filter
     auto no_io = context.options->read_tier == kBlockCacheTier;
     Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
     const Slice* const const_ikey_ptr = &context.version.key_info.internal_key;

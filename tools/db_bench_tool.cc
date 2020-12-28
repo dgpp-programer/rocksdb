@@ -4897,6 +4897,52 @@ class Benchmark {
     return key_rand;
   }
 
+  void ReadRandomTest(ThreadState* thread) {
+    int64_t bytes = 0;
+    int64_t complete = 0;
+    int64_t key_rand = GetRandomKey(&thread->rand);
+    ReadOptions options(FLAGS_verify_checksum, true);
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(1, sizeof(struct AsyncContext)));
+    if (!ctx) {
+      return;
+    }
+    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
+    PinnableSlice pinnable_val;
+    ctx->options = &options;
+    ctx->get.cf = db_with_cfh->db->DefaultColumnFamily();
+    ctx->get.value = &pinnable_val;
+    ctx->get.callback = [&](AsyncContext& ctx_) {
+      if (!ctx_.status.ok()) {
+        fprintf(stderr, "Get returned an error: %s\n", ctx_.status.ToString().c_str());
+      } else {
+        bytes += ctx_.get.key->size() + ctx_.get.value->size();
+        fprintf(stdout, "total read bytes : %ld, current key is %s, current value is %s. \n", bytes,
+            ctx_.get.key->ToString(true).c_str(), ctx_.get.value->ToString(true).c_str());
+      }
+      ctx_.get.value->Reset();
+      thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, ctx_.get.start_time);
+      complete++;
+    };
+    GenerateKeyFromInt(key_rand, FLAGS_num, &key);
+    key_rand = GetRandomKey(&thread->rand);
+    ctx->get.key = &key;
+    ctx->get.start_time = FLAGS_env->NowMicros();
+    db_with_cfh->db->GetAsync(*ctx);
+
+    struct spdk_poller *poller;
+    struct spdk_thread *spdk_thread = spdk_get_thread();
+    while (complete != 1) {
+      TAILQ_FOREACH(poller, &spdk_thread->active_pollers, tailq) {
+        poller->fn(poller->arg);
+      }
+    }
+
+    thread->stats.AddBytes(bytes);
+    free(ctx);
+  }
+
   void ReadRandomAsync(ThreadState* thread) {
     int64_t found = 0;
     int64_t bytes = 0;
@@ -7018,9 +7064,17 @@ int db_bench_tool(int argc, char** argv) {
   // set business code
   SharedState shared;
   if (!FLAGS_spdk.empty()) {
+    void (Benchmark::*method)(ThreadState*) = nullptr;
+    auto benchName = FLAGS_benchmarks;
+    if (benchName == "readrandom") {
+      method = &Benchmark::ReadRandom;
+    } else if (benchName == "readrandomasync") {
+      method = &Benchmark::ReadRandomAsync;
+    } else if (benchName == "readrandomtest") {
+      method = &Benchmark::ReadRandomTest;
+    }
     std::function<void()> func = [&](){
-      benchmark->RunBenchmark(&Benchmark::ReadRandomAsync, &shared);
-      // benchmark->RunBenchmark(&Benchmark::SeekRandom, &shared);
+      benchmark->RunBenchmark(method, &shared);
       shared.num_done++;
       shared.cv.SignalAll();
     };
@@ -7035,7 +7089,10 @@ int db_bench_tool(int argc, char** argv) {
       shared.cv.Wait();
     }
     fprintf(stdout, "bench complete........\n");
-    shared.stats.Report("randomread");
+    if (FLAGS_statistics) {
+      fprintf(stdout, "STATISTICS:\n%s\n", dbstats->ToString().c_str());
+    }
+    shared.stats.Report(benchName);
     delete benchmark;
     delete FLAGS_env;
   } else {

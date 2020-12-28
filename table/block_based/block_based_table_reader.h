@@ -81,6 +81,7 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
   // The longest prefix of the cache key used to identify blocks.
   // For Posix files the unique ID is three varints.
   static const size_t kMaxCacheKeyPrefixSize = kMaxVarint64Length * 3 + 1;
+  static std::atomic<uint64_t> next_cache_key_id_;
 
   // All the below fields control iterator readahead
   static const size_t kInitAutoReadaheadSize = 8 * 1024;
@@ -202,7 +203,7 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
 
   // IndexReader is the interface that provides the functionality for index
   // access.
-  class IndexReader : public AsyncCallback {
+  class IndexReader : public AsyncCallback, public IteratorCallback {
    public:
     virtual ~IndexReader() = default;
 
@@ -259,6 +260,15 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
                                    CachableEntry<Block>& block,
                                    TBlockIter* input_iter, Status s) const;
 
+  // Either Block::NewDataIterator() or Block::NewIndexIterator().
+  template <typename TBlockIter>
+  static TBlockIter* InitBlockIterator(const Rep* rep, Block* block,
+      TBlockIter* input_iter, bool block_contents_pinned);
+
+  template <typename TBlocklike>
+  void RetrieveBlockAsync(AsyncContext &context,
+      CachableEntry<TBlocklike>* block_entry, bool use_cache) const;
+
   void NewDataBlockIteratorAsync(AsyncContext &context) const;
 
   class PartitionedIndexIteratorState;
@@ -282,7 +292,6 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
   friend class FullFilterBlockReader;
   friend class BinarySearchIndexReader;
   friend class BlockFetcher;
-  static std::atomic<uint64_t> next_cache_key_id_;
   BlockCacheTracer* const block_cache_tracer_;
 
   void UpdateCacheHitMetrics(BlockType block_type, GetContext* get_context,
@@ -294,12 +303,6 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
   Cache::Handle* GetEntryFromCache(Cache* block_cache, const Slice& key,
                                    BlockType block_type,
                                    GetContext* get_context) const;
-
-  // Either Block::NewDataIterator() or Block::NewIndexIterator().
-  template <typename TBlockIter>
-  static TBlockIter* InitBlockIterator(const Rep* rep, Block* block,
-                                       TBlockIter* input_iter,
-                                       bool block_contents_pinned);
 
   // If block cache enabled (compressed or uncompressed), looks for the block
   // identified by handle in (1) uncompressed cache, (2) compressed cache, and
@@ -348,10 +351,6 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
   template <typename TBlocklike>
   void RetrieveBlockCallback(AsyncContext &context,
       CachableEntry<TBlocklike>* block_entry) const;
-
-  template <typename TBlocklike>
-  void RetrieveBlockAsync(AsyncContext &context,
-      CachableEntry<TBlocklike>* block_entry, bool use_cache) const;
 
   void RetrieveMultipleBlocks(
       const ReadOptions& options, const MultiGetRange* batch,
@@ -651,7 +650,7 @@ struct BlockBasedTable::Rep {
 
 // Iterates over the contents of BlockBasedTable.
 template <class TBlockIter, typename TValue = Slice>
-class BlockBasedTableIterator : public InternalIteratorBase<TValue> {
+class BlockBasedTableIterator : public InternalIteratorBase<TValue>, public AsyncCallback {
   // compaction_readahead_size: its value will only be used if for_compaction =
   // true
  public:
@@ -677,13 +676,35 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue> {
         lookup_context_(caller),
         compaction_readahead_size_(compaction_readahead_size) {}
 
+  BlockBasedTableIterator(const BlockBasedTable* table, AsyncContext* context,
+      const InternalKeyComparator& icomp, InternalIteratorBase<IndexValue>* index_iter,
+      bool check_filter, bool need_upper_bound_check, const SliceTransform* prefix_extractor,
+      BlockType block_type, size_t compaction_readahead_size = 0)
+        : table_(table),
+          context_(context),
+          read_options_(*context->options),
+          icomp_(icomp),
+          user_comparator_(icomp.user_comparator()),
+          index_iter_(index_iter),
+          pinned_iters_mgr_(nullptr),
+          block_iter_points_to_real_block_(false),
+          check_filter_(check_filter),
+          need_upper_bound_check_(need_upper_bound_check),
+          prefix_extractor_(prefix_extractor),
+          block_type_(block_type),
+          lookup_context_(context->reader.lookup_context->caller),
+          compaction_readahead_size_(compaction_readahead_size) {}
+
   ~BlockBasedTableIterator() { delete index_iter_; }
 
+  void RetrieveBlockDone(AsyncContext& context) override;
   void Seek(const Slice& target) override;
+  void SeekAsync(AsyncContext& context) override;
   void SeekForPrev(const Slice& target) override;
   void SeekToFirst() override;
   void SeekToLast() override;
   void Next() final override;
+  void NextAsync(AsyncContext& context) override;
   bool NextAndGetResult(IterateResult* result) override;
   void Prev() override;
   bool Valid() const override {
@@ -793,6 +814,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue> {
 
  private:
   const BlockBasedTable* table_;
+  AsyncContext* context_;
   const ReadOptions read_options_;
   const InternalKeyComparator& icomp_;
   UserComparatorWrapper user_comparator_;
@@ -810,6 +832,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue> {
   // True if we're standing at the first key of a block, and we haven't loaded
   // that block yet. A call to value() will trigger loading the block.
   bool is_at_first_key_from_index_ = false;
+  bool materialize_current_block = false;
   bool check_filter_;
   // TODO(Zhongyi): pick a better name
   bool need_upper_bound_check_;
@@ -825,14 +848,25 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue> {
   size_t readahead_limit_ = 0;
   int64_t num_file_reads_ = 0;
   std::unique_ptr<FilePrefetchBuffer> prefetch_buffer_;
+  Slice* target_;
+  std::function<void(BlockBasedTableIterator<TBlockIter, TValue>*)> InitDataBlockCallback;
 
   // If `target` is null, seek to first.
   void SeekImpl(const Slice* target);
-
+  void SeekAsyncCallback();
+  void SeekAsyncImpl();
   void InitDataBlock();
+  void InitDataBlockAsync();
   bool MaterializeCurrentBlock();
+  void MaterializeCurrentBlockAsync();
+  void MaterializeCurrentBlockCallback();
+  void MaterializeCurrentBlockDone();
   void FindKeyForward();
+  void FindKeyForwardAsync();
+  void FindKeyForwardCallback();
   void FindBlockForward();
+  void FindBlockForwardAsync();
+  void FindBlockForwardCallback();
   void FindKeyBackward();
   void CheckOutOfBound();
 

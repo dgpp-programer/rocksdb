@@ -122,6 +122,7 @@ class PartitionedFilterBlockReader : public FilterBlockReaderCommon<Block> {
   const InternalKeyComparator* internal_comparator() const;
   bool index_key_includes_seq() const;
   bool index_value_is_full() const;
+  void RetrieveBlockCallback(AsyncContext& context);
 
  protected:
   std::unordered_map<uint64_t, CachableEntry<ParsedFullFilterBlock>>

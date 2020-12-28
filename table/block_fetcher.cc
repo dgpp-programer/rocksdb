@@ -197,16 +197,18 @@ inline void BlockFetcher::GetBlockContents() {
 
 void BlockFetcher::ReadBlockContentsDone(AsyncContext& context) {
   if (block_type_ == BlockType::kFilter) {
-    CachableEntry<ParsedFullFilterBlock> *block;
-    return context.reader.read_contents_no_cache
-        ? table_->ReadBlockContentsDone(context, block)
-        : table_->ReadBlockContentsCallback(context, block);
-  } else {
-    CachableEntry<Block> *block;
-    return context.reader.read_contents_no_cache
-        ? table_->ReadBlockContentsDone(context, block)
-        : table_->ReadBlockContentsCallback(context, block);
+    if (context.reader.second_level
+        || table_->get_rep()->filter_type == BlockBasedTable::Rep::FilterType::kFullFilter) {
+      CachableEntry<ParsedFullFilterBlock> *block;
+      return context.reader.read_contents_no_cache
+          ? table_->ReadBlockContentsDone(context, block)
+          : table_->ReadBlockContentsCallback(context, block);
+    }
   }
+  CachableEntry<Block> *block;
+  return context.reader.read_contents_no_cache
+      ? table_->ReadBlockContentsDone(context, block)
+      : table_->ReadBlockContentsCallback(context, block);
 }
 
 void BlockFetcher::ReadBlockContentsCallback(AsyncContext& context) {

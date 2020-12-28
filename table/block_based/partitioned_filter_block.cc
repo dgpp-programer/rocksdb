@@ -172,7 +172,23 @@ bool PartitionedFilterBlockReader::KeyMayMatch(
                   &FullFilterBlockReader::KeyMayMatch);
 }
 
+void PartitionedFilterBlockReader::RetrieveBlockCallback(AsyncContext& context) {
+  auto t = const_cast<BlockBasedTable*>(table());
+  if (UNLIKELY(!context.status.ok())) {
+    context.reader.key_may_match = true;
+    return t->GetAsyncCallback(context);
+  }
+
+  CachableEntry<ParsedFullFilterBlock> filter_block; // no need filter_block
+  FullFilterBlockReader filter_partition(table_, std::move(filter_block));
+  filter_partition.RetrieveBlockDone(context);
+}
+
 void PartitionedFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
+  if (context.reader.second_level) {
+    context.reader.second_level = false;
+    return RetrieveBlockCallback(context);
+  }
   auto t = const_cast<BlockBasedTable*>(table());
   if (UNLIKELY(!context.status.ok())) {
     context.reader.key_may_match = true;
@@ -190,31 +206,28 @@ void PartitionedFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
     return t->GetAsyncCallback(context);
   }
 
-  CachableEntry<ParsedFullFilterBlock> filter_partition_block;
+  auto entry = context.reader.retrieve_block.block.release();
+  delete entry; // TODO chenxu14 should we cache move it to filter_block_?
 
-  // TODO make this async
-  auto no_io = context.options->read_tier == kBlockCacheTier;
-  context.status = GetFilterPartitionBlock(nullptr /* prefetch_buffer */, filter_handle,
-      no_io, context.version.getCtx.get(), context.reader.lookup_context.get(),
-      &filter_partition_block);
-  if (UNLIKELY(!context.status.ok())) {
-    context.reader.key_may_match = true;
-    return t->GetAsyncCallback(context);
+  context.reader.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+  if (!filter_map_.empty()) { // TODO chenxu14 test
+    auto iter = filter_map_.find(filter_handle.offset());
+    if (iter != filter_map_.end()) {
+      context.reader.retrieve_block.full_filter_block->SetUnownedValue(iter->second.GetValue());
+      context.status = Status::OK();
+      return RetrieveBlockCallback(context);
+    }
   }
 
-  FilterFunction filter_function = &FullFilterBlockReader::KeyMayMatch;
-  Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
-  size_t ts_sz = table_->get_rep()->internal_comparator.user_comparator()->timestamp_size();
-  Slice user_key_without_ts = StripTimestampFromUserKey(user_key, ts_sz);
-  FullFilterBlockReader filter_partition(table(), std::move(filter_partition_block));
-  const Slice* const const_ikey_ptr = &context.version.key_info.internal_key;
-
-  // TODO make this async
-  context.reader.key_may_match = (filter_partition.*filter_function)(
-      user_key_without_ts, context.reader.prefix_extractor.get(),
-      context.reader.block_offset, no_io, const_ikey_ptr, context.version.getCtx.get(),
-      context.reader.lookup_context.get());
-  return;
+  context.reader.second_level = true;
+  context.reader.async_cb = this;
+  context.reader.block_type = BlockType::kFilter;
+  context.reader.prefetch_buffer = nullptr;
+  context.reader.handle = &filter_handle;
+  context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+      &UncompressionDict::GetEmptyDict());
+  context.reader.for_compaction = false;
+  table_->RetrieveBlockAsync(context, context.reader.retrieve_block.full_filter_block.get(), true);
 }
 
 void PartitionedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
@@ -226,7 +239,7 @@ void PartitionedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   }
 
   context.reader.retrieve_block.block.reset(new CachableEntry<Block>());
-  if (!filter_block_.IsEmpty()) {
+  if (!filter_block_.IsEmpty()) { // TODO chenxu14 test cache not hit
     context.reader.retrieve_block.block->SetUnownedValue(filter_block_.GetValue());
     context.status = Status::OK();
     return RetrieveBlockDone(context);
@@ -235,13 +248,17 @@ void PartitionedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   PERF_TIMER_GUARD(read_filter_block_nanos);
   const BlockBasedTable::Rep* const rep = table_->get_rep();
   assert(rep);
-  // TODO make this async
-  context.status = table_->RetrieveBlock(nullptr, *context.options, rep->filter_handle,
-      UncompressionDict::GetEmptyDict(), context.reader.retrieve_block.block.get(),
-      BlockType::kFilter, context.version.getCtx.get(), context.reader.lookup_context.get(),
-      /* for_compaction */ false, cache_filter_blocks());
 
-  RetrieveBlockDone(context);
+  context.reader.second_level = false;
+  context.reader.async_cb = this;
+  context.reader.block_type = BlockType::kFilter;
+  context.reader.prefetch_buffer = nullptr;
+  context.reader.handle = const_cast<BlockHandle*>(&rep->filter_handle);
+  context.reader.uncompression_dict = const_cast<UncompressionDict*>(
+      &UncompressionDict::GetEmptyDict());
+  context.reader.for_compaction = false;
+  table_->RetrieveBlockAsync(context, context.reader.retrieve_block.block.get(),
+      cache_filter_blocks());
 }
 
 bool PartitionedFilterBlockReader::PrefixMayMatch(

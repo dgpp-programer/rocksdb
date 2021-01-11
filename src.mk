@@ -330,6 +330,7 @@ MAIN_SOURCES =                                                          \
   db/db_statistics_test.cc                                              \
   db/db_table_properties_test.cc                                        \
   db/db_tailing_iter_test.cc                                            \
+  db/db_async_test.cc                                                   \
   db/db_test.cc                                                         \
   db/db_test2.cc                                                        \
   db/db_universal_compaction_test.cc                                    \

@@ -220,6 +220,12 @@ class MockRandomAccessFile : public RandomAccessFile {
     return file_->Read(offset, n, result, scratch);
   }
 
+  void ReadAsync(AsyncContext &context) const override {
+    context.status = file_->Read(context.get.offset, context.get.length,
+        context.get.result, context.get.scratch);
+    (context.reader.block_fetcher.get()->*context.get.read_complete)(context);
+  }
+
  private:
   MemFile* file_;
 };

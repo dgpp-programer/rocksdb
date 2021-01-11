@@ -16,6 +16,10 @@ There are few options when compiling RocksDB:
 
 * `make check` will compile and run all the unit tests. `make check` will compile RocksDB in debug mode.
 
+* when enable spdk, we should run `export CONFIG_DEBUG=y && make -j32 check` to compile and run all the unit tests.
+
+* `export USE_RTTI=1 && make -j32 db_bench DEBUG_LEVEL=0` will generate db_bench
+
 * `make all` will compile our static library, and all our tools and unit tests. Our tools
 depend on gflags. You will need to have gflags installed to run `make all`. This will compile RocksDB in debug mode. Don't
 use binaries compiled by `make all` in production.

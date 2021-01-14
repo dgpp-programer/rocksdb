@@ -562,10 +562,16 @@ class Version {
   void AddIterators(const ReadOptions&, const FileOptions& soptions,
                     MergeIteratorBuilder* merger_iter_builder,
                     RangeDelAggregator* range_del_agg);
+  void AddAsyncSupportIterators(AsyncContext&, const FileOptions& soptions,
+      MergeIteratorBuilder* merger_iter_builder, RangeDelAggregator* range_del_agg);
 
   void AddIteratorsForLevel(const ReadOptions&, const FileOptions& soptions,
                             MergeIteratorBuilder* merger_iter_builder,
                             int level, RangeDelAggregator* range_del_agg);
+
+  void AddAsyncSupportIteratorsForLevel(AsyncContext&, const FileOptions& soptions,
+      MergeIteratorBuilder* merger_iter_builder, int level,
+      RangeDelAggregator* range_del_agg);
 
   Status OverlapWithLevelIterator(const ReadOptions&, const FileOptions&,
                                   const Slice& smallest_user_key,

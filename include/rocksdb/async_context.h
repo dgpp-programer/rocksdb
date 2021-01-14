@@ -22,7 +22,6 @@ class MergeContext;
 class LookupKey;
 class PinnedIteratorsManager;
 class SliceTransform;
-class BlockBasedTable;
 class Block;
 class FilterBlockReader;
 class ParsedFullFilterBlock;
@@ -34,6 +33,7 @@ class DataBlockIter;
 class DBImpl;
 class Version;
 class TableCache;
+class ReadCallback;
 
 template <class T> class CachableEntry;
 template <class TValue> class InternalIteratorBase;
@@ -55,7 +55,7 @@ public:
 class IteratorCallback {
 public:
   virtual ~IteratorCallback() = default;
-  virtual void IterateNextDone(AsyncContext&) {}
+  virtual void SeekDone(AsyncContext&) = 0;
 };
 
 typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
@@ -74,6 +74,15 @@ struct AsyncContext {
     read_complete_cb read_complete;
     std::function<void(AsyncContext&)> callback;
   } get;
+
+  struct {
+    Slice* startKey;
+    uint64_t child_index;
+    IteratorCallback* merging_iter_cb;
+    ReadCallback* read_cb;
+    std::function<void(AsyncContext&)> seek_callback;
+    std::function<void(AsyncContext&)> next_callback;
+  } scan;
 
   struct {
     ColumnFamilyData *cfd;
@@ -99,30 +108,33 @@ struct AsyncContext {
   struct {
     bool key_may_match;
     bool skip_filters;
+    bool skip_seek; // when build iterator, no need to do index seek
+    bool two_level_index_seek;
     bool for_compaction;
     bool read_contents_no_cache;
     bool second_level; // used by PartitionedFilterBlockReader
     uint64_t block_offset;
     BlockType block_type;
     FilePrefetchBuffer* prefetch_buffer;
-    BlockHandle* handle; // TODO change to BlockHandle?
+    BlockHandle* handle;
     char* cache_key; // TODO when to delete
     char* compressed_cache_key;
     Slice key;
     Slice ckey;
     UncompressionDict* uncompression_dict;
     std::unique_ptr<BlockCacheLookupContext> lookup_context;
-    std::shared_ptr<const SliceTransform> prefix_extractor;
+    std::shared_ptr<const SliceTransform> prefix_extractor; // TODO context->version.sv->mutable_cf_options.prefix_extractor.get()
     std::unique_ptr<BlockFetcher> block_fetcher;
     std::unique_ptr<BlockContents> raw_block_contents;
     AsyncCallback* async_cb;
     IteratorCallback* iter_cb;
+    IteratorCallback* index_iter_cb;
     union {
       std::unique_ptr<CachableEntry<Generic>> cache_entry;
       std::unique_ptr<CachableEntry<BlockContents>> contents; // BlockBasedFilterBlockReader
       std::unique_ptr<CachableEntry<Block>> block; // BinarySearchIndexReader & PartitionedFilterBlockReader
       std::unique_ptr<CachableEntry<ParsedFullFilterBlock>> full_filter_block; // FullFilterBlockReader
-    } retrieve_block; // TODO do release
+    } retrieve_block;
     std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
     std::unique_ptr<DataBlockIter> data_iter;
   } reader;

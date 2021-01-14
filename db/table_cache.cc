@@ -180,7 +180,7 @@ InternalIterator* TableCache::NewIterator(
     TableReader** table_reader_ptr, HistogramImpl* file_read_hist,
     TableReaderCaller caller, Arena* arena, bool skip_filters, int level,
     const InternalKey* smallest_compaction_key,
-    const InternalKey* largest_compaction_key) {
+    const InternalKey* largest_compaction_key, AsyncContext* context) {
   PERF_TIMER_GUARD(new_table_iterator_nanos);
 
   Status s;
@@ -207,9 +207,14 @@ InternalIterator* TableCache::NewIterator(
         !options.table_filter(*table_reader->GetTableProperties())) {
       result = NewEmptyInternalIterator<Slice>(arena);
     } else {
-      result = table_reader->NewIterator(options, prefix_extractor, arena,
-                                   skip_filters, caller,
-                                   file_options.compaction_readahead_size);
+      if (context) {
+        context->reader.lookup_context.reset(new BlockCacheLookupContext(caller));
+        result = table_reader->NewAsyncIterator(context, prefix_extractor, arena,
+            skip_filters, file_options.compaction_readahead_size);
+      } else {
+        result = table_reader->NewIterator(options, prefix_extractor, arena,
+            skip_filters, caller, file_options.compaction_readahead_size);
+      }
     }
     if (handle != nullptr) {
       result->RegisterCleanup(&UnrefEntry, cache_, handle);

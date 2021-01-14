@@ -53,9 +53,14 @@ class InternalIteratorBase : public Cleanable {
   // the call; after the seek, status() indicates only the error (if any) that
   // happened during the seek, not any past errors.
   virtual void Seek(const Slice& target) = 0;
+
+  /**
+   * method call this should specify context.version.key_info.internal_key
+   * and context.reader.iter_cb or context.reader.index_iter_cb
+   */
   virtual void SeekAsync(AsyncContext& context) {
     Seek(context.version.key_info.internal_key);
-    context.reader.iter_cb->IterateNextDone(context);
+    context.reader.iter_cb->SeekDone(context);
   }
 
   // Position at the first key in the source that at or before target
@@ -69,7 +74,7 @@ class InternalIteratorBase : public Cleanable {
   virtual void Next() = 0;
   virtual void NextAsync(AsyncContext& context) {
     Next();
-    context.reader.iter_cb->IterateNextDone(context);
+    context.reader.iter_cb->SeekDone(context);
   }
 
   // Moves to the next entry in the source, and return result. Iterator

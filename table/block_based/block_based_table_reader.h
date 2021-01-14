@@ -73,7 +73,7 @@ typedef std::vector<std::pair<std::string, std::string>> KVPairBlock;
 // memory, and finally search that record within the block. Of course, to avoid
 // frequent reads of the same block, we introduced the block cache to keep the
 // loaded blocks in the memory.
-class BlockBasedTable : public TableReader, public AsyncCallback{
+class BlockBasedTable : public TableReader, public AsyncCallback {
  public:
   static const std::string kFilterBlockPrefix;
   static const std::string kFullFilterBlockPrefix;
@@ -138,6 +138,9 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
                                 Arena* arena, bool skip_filters,
                                 TableReaderCaller caller,
                                 size_t compaction_readahead_size = 0) override;
+  InternalIterator* NewAsyncIterator(AsyncContext* context,
+      const SliceTransform* prefix_extractor, Arena* arena, bool skip_filters,
+      size_t compaction_readahead_size = 0) override;
 
   FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(
       const ReadOptions& read_options) override;
@@ -218,8 +221,9 @@ class BlockBasedTable : public TableReader, public AsyncCallback{
         const ReadOptions& read_options, bool disable_prefix_seek,
         IndexBlockIter* iter, GetContext* get_context,
         BlockCacheLookupContext* lookup_context) = 0;
-
-    virtual void NewIteratorAsync(AsyncContext &context) = 0;
+    virtual InternalIteratorBase<IndexValue>* NewLazyInitIndexIterator(
+        AsyncContext &context) = 0;
+    virtual void NewAsyncIndexIterator(AsyncContext &context) = 0;
     virtual void IterateNextIndexKey(AsyncContext& context) = 0;
     virtual void NewDataBlockIteratorCallback(AsyncContext& context) = 0;
 
@@ -521,6 +525,50 @@ class BlockBasedTable::PartitionedIndexIteratorState
   std::unordered_map<uint64_t, CachableEntry<Block>>* block_map_;
 };
 
+class IndexBlockLazyInitIter : public InternalIteratorBase<IndexValue>, public AsyncCallback {
+ public:
+  explicit IndexBlockLazyInitIter(const BlockBasedTable* table)
+      : table_(table), inner_iter_(nullptr) {}
+  ~IndexBlockLazyInitIter() {
+    if (inner_iter_) {
+      delete inner_iter_;
+    }
+  }
+  void Seek(const Slice& target) override {
+    // TODO chenxu14 read index block first
+    assert(inner_iter_ != nullptr);
+    inner_iter_->Seek(target);
+  }
+  void Next() override {
+    assert(inner_iter_ != nullptr);
+    inner_iter_->Next();
+  }
+  Slice key() const override {
+    assert(inner_iter_ != nullptr);
+    return inner_iter_->key();
+  }
+  IndexValue value() const override {
+    assert(inner_iter_ != nullptr);
+    return inner_iter_->value();
+  }
+  bool Valid() const override {
+    return inner_iter_ && inner_iter_->Valid();
+  }
+  Status status() const override {
+    return (inner_iter_ != nullptr) ? inner_iter_->status() : Status::OK();
+  }
+  void SeekAsync(AsyncContext& context) override;
+  void SeekForPrev(const Slice& /*target*/) override {}
+  void SeekToFirst() override {}
+  void SeekToLast() override {}
+  void Prev() override { assert(false); }
+  void NextAsync(AsyncContext&) override {}
+  void RetrieveBlockDone(AsyncContext& context) override;
+private:
+ const BlockBasedTable* table_;
+ InternalIteratorBase<IndexValue>* inner_iter_;
+};
+
 // Stores all the properties associated with a BlockBasedTable.
 // These are immutable.
 struct BlockBasedTable::Rep {
@@ -650,7 +698,8 @@ struct BlockBasedTable::Rep {
 
 // Iterates over the contents of BlockBasedTable.
 template <class TBlockIter, typename TValue = Slice>
-class BlockBasedTableIterator : public InternalIteratorBase<TValue>, public AsyncCallback {
+class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
+    public AsyncCallback, public IteratorCallback {
   // compaction_readahead_size: its value will only be used if for_compaction =
   // true
  public:
@@ -698,6 +747,10 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>, public Asyn
   ~BlockBasedTableIterator() { delete index_iter_; }
 
   void RetrieveBlockDone(AsyncContext& context) override;
+  /**
+   * callback of index_iter
+   */
+  void SeekDone(AsyncContext& context) override;
   void Seek(const Slice& target) override;
   void SeekAsync(AsyncContext& context) override;
   void SeekForPrev(const Slice& target) override;
@@ -854,6 +907,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>, public Asyn
   // If `target` is null, seek to first.
   void SeekImpl(const Slice* target);
   void SeekAsyncCallback();
+  void SeekAsyncDone();
   void SeekAsyncImpl();
   void InitDataBlock();
   void InitDataBlockAsync();
@@ -869,6 +923,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>, public Asyn
   void FindBlockForwardCallback();
   void FindKeyBackward();
   void CheckOutOfBound();
+  void IteratorDone();
 
   // Check if data block is fully within iterate_upper_bound.
   //

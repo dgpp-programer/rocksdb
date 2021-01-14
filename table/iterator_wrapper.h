@@ -78,6 +78,16 @@ class IteratorWrapperBase {
     iter_->Seek(k);
     Update();
   }
+
+  /**
+   * method call this should specify context.reader.iter_cb,
+   * and call IteratorWrapperBase::Update() in SeekDone
+   */
+  void SeekAsync(AsyncContext& context) {
+    assert(iter_);
+    iter_->SeekAsync(context);
+  }
+
   void SeekForPrev(const Slice& k) {
     assert(iter_);
     iter_->SeekForPrev(k);
@@ -109,7 +119,6 @@ class IteratorWrapperBase {
     return iter_->IsValuePinned();
   }
 
- private:
   void Update() {
     valid_ = iter_->Valid();
     if (valid_) {
@@ -118,7 +127,7 @@ class IteratorWrapperBase {
       result_.may_be_out_of_upper_bound = true;
     }
   }
-
+ private:
   InternalIteratorBase<TValue>* iter_;
   IterateResult result_;
   bool valid_;

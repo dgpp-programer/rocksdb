@@ -52,10 +52,12 @@ class ArenaWrappedDBIter : public Iterator {
   virtual void SeekToFirst() override { db_iter_->SeekToFirst(); }
   virtual void SeekToLast() override { db_iter_->SeekToLast(); }
   virtual void Seek(const Slice& target) override { db_iter_->Seek(target); }
+  virtual void SeekAsync(AsyncContext &ctx) override { db_iter_->SeekAsync(ctx); }
   virtual void SeekForPrev(const Slice& target) override {
     db_iter_->SeekForPrev(target);
   }
   virtual void Next() override { db_iter_->Next(); }
+  virtual void NextAsync(AsyncContext &ctx) override { db_iter_->NextAsync(ctx); }
   virtual void Prev() override { db_iter_->Prev(); }
   virtual Slice key() const override { return db_iter_->key(); }
   virtual Slice value() const override { return db_iter_->value(); }
@@ -73,6 +75,9 @@ class ArenaWrappedDBIter : public Iterator {
             uint64_t max_sequential_skip_in_iterations, uint64_t version_number,
             ReadCallback* read_callback, DBImpl* db_impl, ColumnFamilyData* cfd,
             bool allow_blob, bool allow_refresh);
+
+  void Init(AsyncContext& context, const SequenceNumber& sequence,
+      bool allow_blob, bool allow_refresh);
 
   // Store some parameters so we can refresh the iterator at a later point
   // with these same params
@@ -109,4 +114,8 @@ extern ArenaWrappedDBIter* NewArenaWrappedDbIterator(
     ReadCallback* read_callback, DBImpl* db_impl = nullptr,
     ColumnFamilyData* cfd = nullptr, bool allow_blob = false,
     bool allow_refresh = true);
+
+extern ArenaWrappedDBIter* NewArenaWrappedDbIterator(
+    AsyncContext& context, const SequenceNumber& sequence,
+	bool allow_blob = false, bool allow_refresh = true);
 }  // namespace rocksdb

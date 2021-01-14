@@ -52,6 +52,12 @@ class TableReader {
       bool skip_filters, TableReaderCaller caller,
       size_t compaction_readahead_size = 0) = 0;
 
+  virtual InternalIterator* NewAsyncIterator(
+      AsyncContext* context, const SliceTransform*, Arena*, bool, size_t) {
+    context->status = Status::NotSupported("NewAsyncIterator not support.");
+    return NewErrorInternalIterator(context->status);
+  }
+
   virtual FragmentedRangeTombstoneIterator* NewRangeTombstoneIterator(
       const ReadOptions& /*read_options*/) {
     return nullptr;

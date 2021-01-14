@@ -73,7 +73,7 @@ class TableCache {
       const SliceTransform* prefix_extractor, TableReader** table_reader_ptr,
       HistogramImpl* file_read_hist, TableReaderCaller caller, Arena* arena,
       bool skip_filters, int level, const InternalKey* smallest_compaction_key,
-      const InternalKey* largest_compaction_key);
+      const InternalKey* largest_compaction_key, AsyncContext* context = nullptr);
 
   void GetAsync(AsyncContext& context,
       const InternalKeyComparator& internal_comparator,

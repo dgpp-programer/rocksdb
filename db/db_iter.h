@@ -53,7 +53,7 @@ namespace rocksdb {
 // combines multiple entries for the same userkey found in the DB
 // representation into a single entry while accounting for sequence
 // numbers, deletion markers, overwrites, etc.
-class DBIter final : public Iterator {
+class DBIter final : public Iterator, public IteratorCallback {
  public:
   // The following is grossly complicated. TODO: clean it up
   // Which direction is the iterator currently moving?
@@ -119,6 +119,12 @@ class DBIter final : public Iterator {
          ReadCallback* read_callback, DBImpl* db_impl, ColumnFamilyData* cfd,
          bool allow_blob);
 
+  /**
+   * when do async scan, should use this constructor
+   */
+  DBIter(AsyncContext* context, InternalIterator* iter, SequenceNumber s,
+      bool allow_blob, bool arena_mode);
+
   // No copying allowed
   DBIter(const DBIter&) = delete;
   void operator=(const DBIter&) = delete;
@@ -179,8 +185,11 @@ class DBIter final : public Iterator {
   Status GetProperty(std::string prop_name, std::string* prop) override;
 
   void Next() final override;
+  void NextAsync(AsyncContext& context) final override;
+  void SeekDone(AsyncContext& context) final override;
   void Prev() final override;
   void Seek(const Slice& target) final override;
+  void SeekAsync(AsyncContext& context) final override;
   void SeekForPrev(const Slice& target) final override;
   void SeekToFirst() final override;
   void SeekToLast() final override;
@@ -257,6 +266,7 @@ class DBIter final : public Iterator {
     num_internal_keys_skipped_ = 0;
   }
 
+  AsyncContext* context_;
   const SliceTransform* prefix_extractor_;
   Env* const env_;
   Logger* logger_;

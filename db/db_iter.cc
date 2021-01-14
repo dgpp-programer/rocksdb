@@ -92,6 +92,47 @@ DBIter::DBIter(Env* _env, const ReadOptions& read_options,
   }
 }
 
+DBIter::DBIter(AsyncContext* context, InternalIterator* iter, SequenceNumber s,
+    bool allow_blob, bool arena_mode)
+    : context_(context),
+      prefix_extractor_(context->version.sv->mutable_cf_options.prefix_extractor.get()),
+      env_(context->version.db_impl->GetEnv()),
+      logger_(context->version.cfd->ioptions()->info_log),
+      user_comparator_(context->version.cfd->user_comparator()),
+      merge_operator_(context->version.cfd->ioptions()->merge_operator),
+	  iter_(iter),
+      read_callback_(context->scan.read_cb),
+      sequence_(s),
+      statistics_(context->version.cfd->ioptions()->statistics),
+      num_internal_keys_skipped_(0),
+      iterate_lower_bound_(context->options->iterate_lower_bound),
+      iterate_upper_bound_(context->options->iterate_upper_bound),
+      direction_(kForward),
+      valid_(false),
+      current_entry_is_merged_(false),
+      is_key_seqnum_zero_(false),
+      prefix_same_as_start_(context->version.sv->mutable_cf_options.prefix_extractor
+          ? context->options->prefix_same_as_start : false),
+      pin_thru_lifetime_(context->options->pin_data),
+      total_order_seek_(context->options->total_order_seek),
+      allow_blob_(allow_blob),
+      is_blob_(false),
+      arena_mode_(arena_mode),
+      range_del_agg_(&context->version.cfd->ioptions()->internal_comparator, s),
+      db_impl_(context->version.db_impl),
+      cfd_(context->version.cfd),
+      start_seqnum_(context->options->iter_start_seqnum) {
+  RecordTick(statistics_, NO_ITERATOR_CREATED);
+  max_skip_ = context->version.sv->mutable_cf_options.max_sequential_skip_in_iterations;
+  max_skippable_internal_keys_ = context->options->max_skippable_internal_keys;
+  if (pin_thru_lifetime_) {
+    pinned_iters_mgr_.StartPinning();
+  }
+  if (iter_.iter()) {
+    iter_.iter()->SetPinnedItersMgr(&pinned_iters_mgr_);
+  }
+}
+
 Status DBIter::GetProperty(std::string prop_name, std::string* prop) {
   if (prop == nullptr) {
     return Status::InvalidArgument("prop is nullptr");
@@ -123,6 +164,52 @@ bool DBIter::ParseKey(ParsedInternalKey* ikey) {
   } else {
     return true;
   }
+}
+
+void DBIter::NextAsync(AsyncContext& context) {
+  assert(valid_);
+  assert(status_.ok());
+
+  // Release temporarily pinned blocks from last operation
+  ReleaseTempPinnedData();
+  local_stats_.skip_count_ += num_internal_keys_skipped_;
+  local_stats_.skip_count_--;
+  num_internal_keys_skipped_ = 0;
+  bool ok = true;
+  if (direction_ == kReverse) {
+    is_key_seqnum_zero_ = false;
+    if (!ReverseToForward()) { // TODO chenxu14 async this
+      ok = false;
+    }
+  } else if (!current_entry_is_merged_) {
+    // If the current value is not a merge, the iter position is the
+    // current key, which is already returned. We can safely issue a
+    // Next() without checking the current key.
+    // If the current key is a merge, very likely iter already points
+    // to the next internal position.
+    assert(iter_.Valid());
+    iter_.Next(); // DOING
+    PERF_COUNTER_ADD(internal_key_skipped_count, 1);
+  }
+
+  local_stats_.next_count_++;
+  if (ok && iter_.Valid()) {
+    Slice prefix;
+    if (prefix_same_as_start_) {
+      assert(prefix_extractor_ != nullptr);
+      prefix = prefix_.GetUserKey();
+    }
+    FindNextUserEntry(true /* skipping the current user key */,
+        prefix_same_as_start_ ? &prefix : nullptr);
+  } else {
+    is_key_seqnum_zero_ = false;
+    valid_ = false;
+  }
+  if (statistics_ != nullptr && valid_) {
+    local_stats_.next_found_count_++;
+    local_stats_.bytes_read_ += (key().size() + value().size());
+  }
+  context.scan.next_callback(context);
 }
 
 void DBIter::Next() {
@@ -1095,6 +1182,72 @@ void DBIter::SetSavedKeyToSeekForPrevTarget(const Slice& target) {
     saved_key_.Clear();
     saved_key_.SetInternalKey(*iterate_upper_bound_, kMaxSequenceNumber);
   }
+}
+
+void DBIter::SeekDone(AsyncContext& context) {
+  iter_.Update();
+  range_del_agg_.InvalidateRangeDelMapPositions();
+  RecordTick(statistics_, NUMBER_DB_SEEK);
+
+  if (!iter_.Valid()) {
+    valid_ = false;
+    return context.scan.seek_callback(context);
+  }
+  direction_ = kForward;
+
+  // Now the inner iterator is placed to the target position. From there,
+  // we need to find out the next key that is visible to the user.
+  //
+  ClearSavedValue();
+  if (prefix_same_as_start_) {
+    // The case where the iterator needs to be invalidated if it has exausted
+    // keys within the same prefix of the seek key.
+    assert(prefix_extractor_ != nullptr);
+    Slice target_prefix;
+    target_prefix = prefix_extractor_->Transform(*context.scan.startKey);
+    FindNextUserEntry(false /* not skipping saved_key */, &target_prefix /* prefix */);
+    if (valid_) {
+      // Remember the prefix of the seek key for the future Prev() call to check.
+      prefix_.SetUserKey(target_prefix);
+    }
+  } else {
+    FindNextUserEntry(false /* not skipping saved_key */, nullptr);
+  }
+  if (!valid_) {
+    return context.scan.seek_callback(context);
+  }
+
+  // Updating stats and perf context counters.
+  if (statistics_ != nullptr) {
+    // Decrement since we don't want to count this key as skipped
+    RecordTick(statistics_, NUMBER_DB_SEEK_FOUND);
+    RecordTick(statistics_, ITER_BYTES_READ, key().size() + value().size());
+  }
+  PERF_COUNTER_ADD(iter_read_bytes, key().size() + value().size());
+  context.scan.seek_callback(context);
+}
+
+void DBIter::SeekAsync(AsyncContext& context) {
+  auto target = *context.scan.startKey;
+  PERF_CPU_TIMER_GUARD(iter_seek_cpu_nanos, env_);
+  StopWatch sw(env_, statistics_, DB_SEEK);
+
+#ifndef ROCKSDB_LITE
+  if (db_impl_ != nullptr && cfd_ != nullptr) {
+    db_impl_->TraceIteratorSeek(cfd_->GetID(), target);
+  }
+#endif  // ROCKSDB_LITE
+
+  context.status = Status::OK();
+  ReleaseTempPinnedData();
+  ResetInternalKeysSkippedCounter();
+
+  // Seek the inner iterator based on the target key.
+  SetSavedKeyToSeekTarget(target);
+  context.version.key_info.internal_key = saved_key_.GetInternalKey();
+  // iter_ is MergingIterator, when call SeekAsync we should specify scan.merging_iter_cb
+  context.scan.merging_iter_cb = this;
+  iter_.SeekAsync(context);
 }
 
 void DBIter::Seek(const Slice& target) {

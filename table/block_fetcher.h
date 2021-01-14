@@ -15,6 +15,8 @@
 
 namespace rocksdb {
 
+class BlockBasedTable;
+
 // Retrieves a single block of a given file. Utilizes the prefetch buffer and/or
 // persistent cache provided (if any) to try to avoid reading from the file
 // directly. Note that both the prefetch buffer and the persistent cache are

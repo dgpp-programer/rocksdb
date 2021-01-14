@@ -82,17 +82,6 @@ void TestWithOptions(Options& options) {
     ASSERT_OK(db->Get(ReadOptions(), keys[i], &res));
     ASSERT_TRUE(res == vals[i]);
   }
-  Iterator* iterator = db->NewIterator(ReadOptions());
-  iterator->SeekToFirst();
-  for (size_t i = 0; i < 3; ++i) {
-    ASSERT_TRUE(iterator->Valid());
-    ASSERT_TRUE(keys[i] == iterator->key());
-    ASSERT_TRUE(vals[i] == iterator->value());
-    iterator->Next();
-  }
-  ASSERT_TRUE(!iterator->Valid());
-  delete iterator;
-
   // TEST_FlushMemTable() is not supported in ROCKSDB_LITE
 #ifndef ROCKSDB_LITE
   DBImpl* dbi = reinterpret_cast<DBImpl*>(db);
@@ -108,6 +97,25 @@ void TestWithOptions(Options& options) {
     ASSERT_OK(db->Get(ReadOptions(), keys[i], &res));
     ASSERT_TRUE(res == vals[i]);
   }
+
+  // test async scan
+  Iterator* iterator = db->NewAsyncIterator(*ctx);
+  ASSERT_OK(ctx->status);
+  size_t index = 0;
+  ctx->scan.startKey = const_cast<Slice*>(&keys[0]);
+  ctx->scan.next_callback = [&](AsyncContext& ctx_) {
+    ASSERT_OK(ctx_.status);
+    if (iterator->Valid()) {
+      ASSERT_TRUE(keys[index] == iterator->key());
+      ASSERT_TRUE(vals[index] == iterator->value());
+      index++;
+      iterator->NextAsync(ctx_);
+    }
+  };
+  ctx->scan.seek_callback = ctx->scan.next_callback;
+  iterator->SeekAsync(*ctx);
+  ASSERT_TRUE(index == 3);
+  delete iterator;
 #endif  // ROCKSDB_LITE
   free(ctx);
   delete db;

@@ -1432,6 +1432,54 @@ static void CleanupIteratorState(void* arg1, void* /*arg2*/) {
 }
 }  // namespace
 
+InternalIterator* DBImpl::NewAsyncSupportInternalIterator(AsyncContext& context,
+    Arena* arena, RangeDelAggregator* range_del_agg, SequenceNumber sequence) {
+  InternalIterator* internal_iter;
+  assert(arena != nullptr);
+  assert(range_del_agg != nullptr);
+  auto super_version = context.version.sv;
+  // Need to create internal iterator from the arena.
+  MergeIteratorBuilder merge_iter_builder(
+      &context.version.cfd->internal_comparator(), arena,
+      !context.options->total_order_seek &&
+	  super_version->mutable_cf_options.prefix_extractor != nullptr);
+  // Collect iterator for mutable mem
+  merge_iter_builder.AddIterator(
+      super_version->mem->NewIterator(*context.options, arena));
+  std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter;
+  if (!context.options->ignore_range_deletions) {
+    range_del_iter.reset(
+        super_version->mem->NewRangeTombstoneIterator(*context.options, sequence));
+    range_del_agg->AddTombstones(std::move(range_del_iter));
+  }
+  // Collect all needed child iterators for immutable memtables
+  if (context.status.ok()) {
+    super_version->imm->AddIterators(*context.options, &merge_iter_builder);
+    if (!context.options->ignore_range_deletions) {
+      context.status = super_version->imm->AddRangeTombstoneIterators(*context.options,
+          arena, range_del_agg);
+    }
+  }
+  TEST_SYNC_POINT_CALLBACK("DBImpl::NewInternalIterator:StatusCallback", &context.status);
+  if (context.status.ok()) {
+    // Collect iterators for files in L0 - Ln
+    if (context.options->read_tier != kMemtableTier) {
+      super_version->current->AddAsyncSupportIterators(context, file_options_,
+          &merge_iter_builder, range_del_agg);
+    }
+    internal_iter = merge_iter_builder.Finish();
+    IterState* cleanup =
+        new IterState(this, &mutex_, super_version,
+            context.options->background_purge_on_iterator_cleanup ||
+                immutable_db_options_.avoid_unnecessary_blocking_io);
+    internal_iter->RegisterCleanup(CleanupIteratorState, cleanup, nullptr);
+    return internal_iter;
+  } else {
+    CleanupSuperVersion(super_version);
+  }
+  return NewErrorInternalIterator<Slice>(context.status, arena);
+}
+
 InternalIterator* DBImpl::NewInternalIterator(const ReadOptions& read_options,
                                               ColumnFamilyData* cfd,
                                               SuperVersion* super_version,
@@ -2514,6 +2562,45 @@ bool DBImpl::KeyMayExist(const ReadOptions& read_options,
   return s.ok() || s.IsIncomplete();
 }
 
+Iterator* DBImpl::NewAsyncIterator(AsyncContext& context) {
+  context.version.db_impl = this;
+  if (context.options->managed) {
+    return NewErrorIterator(
+        Status::NotSupported("Managed iterator is not supported anymore."));
+  }
+  Iterator* result = nullptr;
+  if (context.options->read_tier == kPersistedTier) {
+    return NewErrorIterator(Status::NotSupported(
+        "ReadTier::kPersistedData is not yet supported in iterators."));
+  }
+  // if iterator wants internal keys, we can only proceed if
+  // we can guarantee the deletes haven't been processed yet
+  if (immutable_db_options_.preserve_deletes &&
+      context.options->iter_start_seqnum > 0 &&
+      context.options->iter_start_seqnum < preserve_deletes_seqnum_.load()) {
+    return NewErrorIterator(Status::InvalidArgument(
+        "Iterator requested internal keys which are too old and are not"
+        " guaranteed to be preserved, try larger iter_start_seqnum opt."));
+  }
+  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.get.cf);
+  context.version.cfd = cfh->cfd();
+  if (context.options->tailing) { // TODO chenxu14 UT test this
+#ifdef ROCKSDB_LITE
+    // not supported in lite version
+    result = nullptr;
+#else
+    context.version.sv = context.version.cfd->GetReferencedSuperVersion(this);
+    context.scan.read_cb = nullptr;
+    auto iter = new ForwardIterator(this, *context.options,
+        context.version.cfd, context.version.sv);
+    result = new DBIter(&context, iter, kMaxSequenceNumber, false, false);
+#endif
+  } else {
+    result = NewAsyncSupportIterator(context);
+  }
+  return result;
+}
+
 Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
                               ColumnFamilyHandle* column_family) {
   if (read_options.managed) {
@@ -2561,6 +2648,20 @@ Iterator* DBImpl::NewIterator(const ReadOptions& read_options,
     result = NewIteratorImpl(read_options, cfd, snapshot, read_callback);
   }
   return result;
+}
+
+ArenaWrappedDBIter* DBImpl::NewAsyncSupportIterator(AsyncContext& context, bool allow_blob,
+      bool allow_refresh) {
+  auto snapshot = context.options->snapshot != nullptr
+      ? context.options->snapshot->GetSequenceNumber() : versions_->LastSequence();
+  context.scan.read_cb = nullptr;
+  context.version.sv = context.version.cfd->GetReferencedSuperVersion(this);
+  ArenaWrappedDBIter* db_iter = NewArenaWrappedDbIterator(context, snapshot, allow_blob,
+      ((context.options->snapshot != nullptr) ? false : allow_refresh));
+  InternalIterator* internal_iter = NewAsyncSupportInternalIterator(context,
+      db_iter->GetArena(), db_iter->GetRangeDelAggregator(), snapshot);
+  db_iter->SetIterUnderDBIter(internal_iter);
+  return db_iter;
 }
 
 ArenaWrappedDBIter* DBImpl::NewIteratorImpl(const ReadOptions& read_options,

@@ -239,6 +239,7 @@ class DBImpl : public DB {
   using DB::NewIterator;
   virtual Iterator* NewIterator(const ReadOptions& options,
                                 ColumnFamilyHandle* column_family) override;
+  virtual Iterator* NewAsyncIterator(AsyncContext& context) override;
   virtual Status NewIterators(
       const ReadOptions& options,
       const std::vector<ColumnFamilyHandle*>& column_families,
@@ -467,6 +468,9 @@ class DBImpl : public DB {
                                       bool allow_blob = false,
                                       bool allow_refresh = true);
 
+  ArenaWrappedDBIter* NewAsyncSupportIterator(AsyncContext& context,
+      bool allow_blob = false, bool allow_refresh = true);
+
   virtual SequenceNumber GetLastPublishedSequence() const {
     if (last_seq_same_as_publish_seq_) {
       return versions_->LastSequence();
@@ -692,6 +696,9 @@ class DBImpl : public DB {
 
   InternalIterator* NewInternalIterator(
       const ReadOptions&, ColumnFamilyData* cfd, SuperVersion* super_version,
+      Arena* arena, RangeDelAggregator* range_del_agg, SequenceNumber sequence);
+
+  InternalIterator* NewAsyncSupportInternalIterator(AsyncContext& context,
       Arena* arena, RangeDelAggregator* range_del_agg, SequenceNumber sequence);
 
   // hollow transactions shell used for recovery.

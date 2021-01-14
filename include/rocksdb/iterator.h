@@ -22,6 +22,7 @@
 #include "rocksdb/cleanable.h"
 #include "rocksdb/slice.h"
 #include "rocksdb/status.h"
+#include "rocksdb/async_context.h"
 
 namespace rocksdb {
 
@@ -54,6 +55,9 @@ class Iterator : public Cleanable {
   // the call; after the seek, status() indicates only the error (if any) that
   // happened during the seek, not any past errors.
   virtual void Seek(const Slice& target) = 0;
+  virtual void SeekAsync(AsyncContext& context) {
+    context.status = Status::NotSupported("SeekAsync not supported!");
+  }
 
   // Position at the last key in the source that at or before target.
   // The iterator is Valid() after this call iff the source contains
@@ -64,6 +68,9 @@ class Iterator : public Cleanable {
   // true iff the iterator was not positioned at the last entry in the source.
   // REQUIRES: Valid()
   virtual void Next() = 0;
+  virtual void NextAsync(AsyncContext& context) {
+    context.status = Status::NotSupported("NextAsync not supported!");
+  }
 
   // Moves to the previous entry in the source.  After this call, Valid() is
   // true iff the iterator was not positioned at the first entry in source.

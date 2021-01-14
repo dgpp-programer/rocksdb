@@ -34,7 +34,7 @@ typedef BinaryHeap<IteratorWrapper*, MinIteratorComparator> MergerMinIterHeap;
 
 const size_t kNumIterReserve = 4;
 
-class MergingIterator : public InternalIterator {
+class MergingIterator : public InternalIterator, public IteratorCallback {
  public:
   MergingIterator(const InternalKeyComparator* comparator,
                   InternalIterator** children, int n, bool is_arena_mode,
@@ -106,6 +106,44 @@ class MergingIterator : public InternalIterator {
     }
     direction_ = kReverse;
     current_ = CurrentReverse();
+  }
+
+  void SeekDone(AsyncContext& context) override {
+    auto child = &children_[context.scan.child_index];
+    child->Update();
+    PERF_COUNTER_ADD(seek_child_seek_count, 1);
+    {
+      // Strictly, we timed slightly more than min heap operation,
+      // but these operations are very cheap.
+      PERF_TIMER_GUARD(seek_min_heap_time);
+      AddToMinHeapOrCheckStatus(child);
+    }
+    context.scan.child_index++;
+    if (context.scan.child_index < children_.size()) {
+      child = &children_[context.scan.child_index];
+      child->SeekAsync(context);
+    } else { // all child has been seeked
+      direction_ = kForward;
+      {
+        PERF_TIMER_GUARD(seek_min_heap_time);
+        current_ = CurrentForward();
+      }
+      context.scan.merging_iter_cb->SeekDone(context);
+    }
+  }
+
+  // method call this should specify context.scan.merging_iter_cb
+  void SeekAsync(AsyncContext& context) override {
+    if (children_.size() > 0) {
+      ClearHeaps();
+      context.status = Status::OK();
+      context.reader.iter_cb = this;
+      context.scan.child_index = 0;
+      auto child = &children_[context.scan.child_index];
+      child->SeekAsync(context);
+    } else {
+      context.scan.merging_iter_cb->SeekDone(context);
+    }
   }
 
   void Seek(const Slice& target) override {

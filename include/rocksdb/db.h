@@ -565,6 +565,11 @@ class DB {
   // The returned iterator should be deleted before this db is deleted.
   virtual Iterator* NewIterator(const ReadOptions& options,
                                 ColumnFamilyHandle* column_family) = 0;
+  virtual Iterator* NewAsyncIterator(AsyncContext& context) {
+    context.status = Status::NotSupported("NewAsyncIterator not supported.");
+    return NewErrorIterator(context.status);
+  }
+
   virtual Iterator* NewIterator(const ReadOptions& options) {
     return NewIterator(options, DefaultColumnFamily());
   }

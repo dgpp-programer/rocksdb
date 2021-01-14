@@ -775,8 +775,8 @@ class LevelIterator final : public InternalIterator {
                 const SliceTransform* prefix_extractor, bool should_sample,
                 HistogramImpl* file_read_hist, TableReaderCaller caller,
                 bool skip_filters, int level, RangeDelAggregator* range_del_agg,
-                const std::vector<AtomicCompactionUnitBoundary>*
-                    compaction_boundaries = nullptr)
+                const std::vector<AtomicCompactionUnitBoundary>* compaction_boundaries = nullptr,
+                AsyncContext* context = nullptr)
       : table_cache_(table_cache),
         read_options_(read_options),
         file_options_(file_options),
@@ -793,7 +793,8 @@ class LevelIterator final : public InternalIterator {
         level_(level),
         range_del_agg_(range_del_agg),
         pinned_iters_mgr_(nullptr),
-        compaction_boundaries_(compaction_boundaries) {
+        compaction_boundaries_(compaction_boundaries),
+        context_(context) {
     // Empty level is not supported.
     assert(flevel_ != nullptr && flevel_->num_files > 0);
   }
@@ -895,7 +896,7 @@ class LevelIterator final : public InternalIterator {
         range_del_agg_, prefix_extractor_,
         nullptr /* don't need reference to table */, file_read_hist_, caller_,
         /*arena=*/nullptr, skip_filters_, level_, smallest_compaction_key,
-        largest_compaction_key);
+        largest_compaction_key, context_);
   }
 
   // Check if current file being fully within iterate_lower_bound.
@@ -935,6 +936,7 @@ class LevelIterator final : public InternalIterator {
   // To be propagated to RangeDelAggregator in order to safely truncate range
   // tombstones.
   const std::vector<AtomicCompactionUnitBoundary>* compaction_boundaries_;
+  AsyncContext* context_;
 };
 
 void LevelIterator::Seek(const Slice& target) {
@@ -1463,6 +1465,14 @@ double VersionStorageInfo::GetEstimatedCompressionRatioAtLevel(
   return static_cast<double>(sum_data_size_bytes) / sum_file_size_bytes;
 }
 
+void Version::AddAsyncSupportIterators(AsyncContext& context, const FileOptions& soptions,
+    MergeIteratorBuilder* merge_iter_builder, RangeDelAggregator* range_del_agg) {
+  assert(storage_info_.finalized_);
+  for (int level = 0; level < storage_info_.num_non_empty_levels(); level++) {
+    AddAsyncSupportIteratorsForLevel(context, soptions, merge_iter_builder, level, range_del_agg);
+  }
+}
+
 void Version::AddIterators(const ReadOptions& read_options,
                            const FileOptions& soptions,
                            MergeIteratorBuilder* merge_iter_builder,
@@ -1472,6 +1482,58 @@ void Version::AddIterators(const ReadOptions& read_options,
   for (int level = 0; level < storage_info_.num_non_empty_levels(); level++) {
     AddIteratorsForLevel(read_options, soptions, merge_iter_builder, level,
                          range_del_agg);
+  }
+}
+
+void Version::AddAsyncSupportIteratorsForLevel(AsyncContext& context, const FileOptions& soptions,
+    MergeIteratorBuilder* merge_iter_builder, int level, RangeDelAggregator* range_del_agg) {
+  assert(storage_info_.finalized_);
+  if (level >= storage_info_.num_non_empty_levels()) {
+    // This is an empty level
+    return;
+  } else if (storage_info_.LevelFilesBrief(level).num_files == 0) {
+    // No files in this level
+    return;
+  }
+
+  bool should_sample = should_sample_file_read();
+  auto* arena = merge_iter_builder->GetArena();
+  if (level == 0) {
+    // Merge all level zero files together since they may overlap
+    for (size_t i = 0; i < storage_info_.LevelFilesBrief(0).num_files; i++) {
+      const auto& file = storage_info_.LevelFilesBrief(0).files[i];
+      merge_iter_builder->AddIterator(cfd_->table_cache()->NewIterator(
+          *context.options, soptions, cfd_->internal_comparator(),
+          *file.file_metadata, range_del_agg,
+          mutable_cf_options_.prefix_extractor.get(), nullptr,
+          cfd_->internal_stats()->GetFileReadHist(0),
+          TableReaderCaller::kUserIterator, arena,
+          /*skip_filters=*/false, /*level=*/0,
+          /*smallest_compaction_key=*/nullptr,
+          /*largest_compaction_key=*/nullptr,
+          &context));
+    }
+    if (should_sample) {
+      // Count ones for every L0 files. This is done per iterator creation
+      // rather than Seek(), while files in other levels are recored per seek.
+      // If users execute one range query per iterator, there may be some
+      // discrepancy here.
+      for (FileMetaData* meta : storage_info_.LevelFiles(0)) {
+        sample_file_read_inc(meta);
+      }
+    }
+  } else if (storage_info_.LevelFilesBrief(level).num_files > 0) {
+    // For levels > 0, we can use a concatenating iterator that sequentially
+    // walks through the non-overlapping files in the level, opening them
+    // lazily.
+    auto* mem = arena->AllocateAligned(sizeof(LevelIterator));
+    merge_iter_builder->AddIterator(new (mem) LevelIterator(
+        cfd_->table_cache(), *context.options, soptions,
+        cfd_->internal_comparator(), &storage_info_.LevelFilesBrief(level),
+        mutable_cf_options_.prefix_extractor.get(), should_sample_file_read(),
+        cfd_->internal_stats()->GetFileReadHist(level),
+        TableReaderCaller::kUserIterator, IsFilterSkipped(level), level,
+        range_del_agg, /*largest_compaction_key=*/nullptr, &context));
   }
 }
 

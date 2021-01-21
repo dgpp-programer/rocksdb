@@ -67,11 +67,18 @@ class IteratorWrapperBase {
   }
   // Methods below require iter() != nullptr
   Status status() const     { assert(iter_); return iter_->status(); }
+
   void Next() {
     assert(iter_);
     valid_ = iter_->NextAndGetResult(&result_);
     assert(!valid_ || iter_->status().ok());
   }
+
+  void NextAsync(AsyncContext& context) {
+    assert(iter_);
+    iter_->NextAsync(context);
+  }
+
   void Prev()               { assert(iter_); iter_->Prev();        Update(); }
   void Seek(const Slice& k) {
     assert(iter_);
@@ -124,7 +131,7 @@ class IteratorWrapperBase {
     if (valid_) {
       assert(iter_->status().ok());
       result_.key = iter_->key();
-      result_.may_be_out_of_upper_bound = true;
+      result_.may_be_out_of_upper_bound = iter_->MayBeOutOfUpperBound();
     }
   }
  private:

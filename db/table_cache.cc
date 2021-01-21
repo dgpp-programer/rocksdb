@@ -375,7 +375,7 @@ void TableCache::GetAsync(AsyncContext& context,
     if (t == nullptr) {
       context.status = FindTable(
           file_options_, internal_comparator, fd, &context.cache.handle,
-          context.reader.prefix_extractor.get(),
+          context.version.sv->mutable_cf_options.prefix_extractor.get(),
           context.options->read_tier == kBlockCacheTier /* no_io */,
           true /* record_read_stats */, file_read_hist,
           context.reader.skip_filters, level);

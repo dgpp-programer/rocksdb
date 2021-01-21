@@ -138,6 +138,7 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
       ClearHeaps();
       context.status = Status::OK();
       context.reader.iter_cb = this;
+      context.reader.iter_seek = true;
       context.scan.child_index = 0;
       auto child = &children_[context.scan.child_index];
       child->SeekAsync(context);
@@ -226,6 +227,31 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
       minHeap_.pop();
     }
     current_ = CurrentForward();
+  }
+
+  void NextDone(AsyncContext& context) override {
+    current_->Update();
+    if (current_->Valid()) {
+      assert(current_->status().ok());
+      minHeap_.replace_top(current_);
+    } else {
+      considerStatus(current_->status());
+      minHeap_.pop();
+    }
+    current_ = CurrentForward();
+    context.scan.merging_iter_cb->NextDone(context);
+  }
+
+  void NextAsync(AsyncContext& context) override {
+    assert(Valid());
+    if (direction_ != kForward) { // TODO chenxu14 async this
+      SwitchToForward();
+      assert(current_ == CurrentForward());
+    }
+    assert(current_ == CurrentForward());
+    context.reader.iter_cb = this;
+    context.reader.iter_seek = false;
+    current_->NextAsync(context);
   }
 
   bool NextAndGetResult(IterateResult* result) override {

@@ -16,6 +16,7 @@
 
 #include "db/dbformat.h"
 #include "db/table_cache.h"
+#include "db/column_family.h"
 #include "db/pinned_iterators_manager.h"
 
 #include "file/file_prefetch_buffer.h"
@@ -333,8 +334,7 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     }
 
     context.reader.index_iter_cb = this;
-    context.reader.two_level_index_seek =
-        rep_t->index_type == BlockBasedTableOptions::kTwoLevelIndexSearch;
+    context.reader.index_iter_seek = false;
     context.reader.index_iter->NextAsync(context);
   }
 
@@ -416,7 +416,7 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
       context.reader.key_may_match =
           filter->KeyMayMatch(ExtractUserKeyAndStripTimestamp(context.version.key_info.internal_key,
               rep_t->internal_comparator.user_comparator()->timestamp_size()),
-          context.reader.prefix_extractor.get(), v.handle.offset(), no_io,
+          context.version.sv->mutable_cf_options.prefix_extractor.get(), v.handle.offset(), no_io,
           /*const_ikey_ptr=*/nullptr, context.version.getCtx.get(),
           context.reader.lookup_context.get());
       if (!context.reader.key_may_match) {
@@ -559,7 +559,7 @@ class PartitionIndexReader : public BlockBasedTable::IndexReaderCommon {
                 nullptr, nullptr, true, index_has_first_key(), index_key_includes_seq(),
                 index_value_is_full()));
       } else {
-        it = new BlockBasedTableIterator<IndexBlockIter, IndexValue>(
+        it = new BlockBasedTableIndexIterator(
             table(), &context, *internal_comparator(),
             context.reader.retrieve_block.block->GetValue()->NewIndexIterator(
                 internal_comparator(), internal_comparator()->user_comparator(),
@@ -573,7 +573,7 @@ class PartitionIndexReader : public BlockBasedTable::IndexReaderCommon {
     }
     if (!context.reader.skip_seek) {
       context.reader.index_iter_cb = this;
-      context.reader.two_level_index_seek = true;
+      context.reader.index_iter_seek = true;
       context.reader.index_iter->SeekAsync(context);
     }
   }
@@ -785,6 +785,7 @@ class BinarySearchIndexReader : public BlockBasedTable::IndexReaderCommon {
     }
     if (!context.reader.skip_seek) {
       context.reader.index_iter_cb = this;
+      context.reader.index_iter_seek = true;
       context.reader.index_iter->SeekAsync(context);
     }
   }
@@ -974,7 +975,8 @@ class HashIndexReader : public BlockBasedTable::IndexReaderCommon {
       context.reader.index_iter.reset(NewErrorInternalIterator<IndexValue>(context.status));
     } else {
       auto disable_prefix_seek = PrefixExtractorChanged(
-          table_->get_rep()->table_properties.get(), context.reader.prefix_extractor.get());
+          table_->get_rep()->table_properties.get(),
+          context.version.sv->mutable_cf_options.prefix_extractor.get());
       auto total_order_seek = context.options->total_order_seek || disable_prefix_seek;
       auto it = context.reader.retrieve_block.block->GetValue()->NewIndexIterator(
           internal_comparator(), internal_comparator()->user_comparator(), nullptr,
@@ -986,6 +988,7 @@ class HashIndexReader : public BlockBasedTable::IndexReaderCommon {
     }
     if (!context.reader.skip_seek) {
       context.reader.index_iter_cb = this;
+      context.reader.index_iter_seek = true;
       context.reader.index_iter->SeekAsync(context);
     }
   }
@@ -3140,10 +3143,9 @@ void IndexBlockLazyInitIter::RetrieveBlockDone(AsyncContext& context) {
   context.reader.skip_seek = true;
   table_->get_rep()->index_reader->RetrieveBlockDone(context);
   inner_iter_ = context.reader.index_iter.release();
-  inner_iter_->SeekAsync(context);
 }
 
-void IndexBlockLazyInitIter::SeekAsync(AsyncContext& context) {
+void IndexBlockLazyInitIter::InitInnerIter(AsyncContext& context) {
   if (inner_iter_ == nullptr) {
     const BlockBasedTable::Rep* const rep = table_->get_rep();
     assert(rep != nullptr);
@@ -3157,6 +3159,19 @@ void IndexBlockLazyInitIter::SeekAsync(AsyncContext& context) {
     context.reader.for_compaction = false;
     return table_->RetrieveBlockAsync(context, context.reader.retrieve_block.block.get(),
         rep->table_options.cache_index_and_filter_blocks);
+  }
+}
+
+void IndexBlockLazyInitIter::NextAsync(AsyncContext& context) {
+  if (inner_iter_ == nullptr) {
+    InitInnerIter(context);
+  }
+  inner_iter_->NextAsync(context);
+}
+
+void IndexBlockLazyInitIter::SeekAsync(AsyncContext& context) {
+  if (inner_iter_ == nullptr) {
+    InitInnerIter(context);
   }
   inner_iter_->SeekAsync(context);
 }
@@ -3297,12 +3312,14 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekToFirst() {
 
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::IteratorDone() {
-  if (context_->reader.two_level_index_seek) {
-    context_->reader.two_level_index_seek = false;
-    context_->reader.index_iter_cb->SeekDone(*context_);
-  } else {
-    context_->reader.iter_cb->SeekDone(*context_);
-  }
+  // TODO chenxu14 consider reduce branch counts
+  return context_->reader.iter_seek ? context_->reader.iter_cb->SeekDone(*context_)
+      : context_->reader.iter_cb->NextDone(*context_);
+}
+
+void BlockBasedTableIndexIterator::IteratorDone() {
+  return context_->reader.index_iter_seek ? context_->reader.index_iter_cb->SeekDone(*context_)
+      : context_->reader.index_iter_cb->NextDone(*context_);
 }
 
 template <class TBlockIter, typename TValue>
@@ -3361,7 +3378,20 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekDone(AsyncContext&) {
   SeekAsyncDone();
 }
 
-// Method call this should specify target_
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekIndexAsync() {
+  context_->reader.index_iter_cb = this;
+  context_->reader.index_iter_seek = true;
+  return index_iter_->SeekAsync(*context_);
+}
+
+void BlockBasedTableIndexIterator::SeekIndexAsync() {
+  // top_level index_block already in memory(through LazyInitIndexIterator)
+  // so no need to do async read
+  index_iter_->Seek(*target_);
+  return SeekAsyncDone();
+}
+
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncImpl() {
   is_out_of_bound_ = false;
@@ -3382,15 +3412,7 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncImpl() {
   }
   if (need_seek_index) {
     if (target_) {
-      if (context_->reader.two_level_index_seek) {
-        // top_level index_block already in memory, no need to do async read
-        index_iter_->Seek(*target_);
-        return SeekAsyncDone();
-      }
-      context_->reader.index_iter_cb = this; // index_reader is BlockBasedTableIterator
-      context_->reader.two_level_index_seek =
-          table_->get_rep()->index_type == BlockBasedTableOptions::kTwoLevelIndexSearch;
-      return index_iter_->SeekAsync(*context_);
+      return SeekIndexAsync();
     } else {
       index_iter_->SeekToFirst();
       // TODO chenxu14 async SeekToFirst
@@ -3894,16 +3916,11 @@ void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardCallback() {
 }
 
 template <class TBlockIter, typename TValue>
-void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardAsync() {
-  if (!block_iter_.status().ok()) {
-    return FindKeyForwardCallback();
-  }
+void BlockBasedTableIterator<TBlockIter, TValue>::NextDone(AsyncContext&) {
   const bool next_block_is_out_of_bound = read_options_.iterate_upper_bound != nullptr
       && block_iter_points_to_real_block_ && !data_block_within_upper_bound_;
   assert(!next_block_is_out_of_bound || user_comparator_.Compare(
       *read_options_.iterate_upper_bound, index_iter_->user_key()) <= 0);
-  ResetDataIter();
-  index_iter_->Next();
   if (next_block_is_out_of_bound) {
     if (index_iter_->Valid()) {
       is_out_of_bound_ = true;
@@ -3921,6 +3938,29 @@ void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardAsync() {
 
   InitDataBlockCallback = &BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardCallback;
   InitDataBlockAsync();
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::NextIndexAsync() {
+  context_->reader.index_iter_cb = this;
+  context_->reader.index_iter_seek = false;
+  return index_iter_->NextAsync(*context_);
+}
+
+void BlockBasedTableIndexIterator::NextIndexAsync() {
+  // top_level index_block already in memory(through LazyInitIndexIterator)
+  // so no need to do async read
+  index_iter_->Next();
+  return NextDone(*context_);
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardAsync() {
+  if (!block_iter_.status().ok()) {
+    return FindKeyForwardCallback();
+  }
+  ResetDataIter();
+  return NextIndexAsync();
 }
 
 template <class TBlockIter, typename TValue>
@@ -4174,7 +4214,7 @@ void BlockBasedTable::GetAsync(AsyncContext& context) {
     auto no_io = context.options->read_tier == kBlockCacheTier;
     Slice user_key = ExtractUserKey(context.version.key_info.internal_key);
     const Slice* const const_ikey_ptr = &context.version.key_info.internal_key;
-    auto prefix_extractor = context.reader.prefix_extractor;
+    auto prefix_extractor = context.version.sv->mutable_cf_options.prefix_extractor;
     if (!context.options->total_order_seek && prefix_extractor &&
       rep_->table_properties->prefix_extractor_name.compare(
           prefix_extractor->Name()) == 0 && prefix_extractor->InDomain(user_key) &&

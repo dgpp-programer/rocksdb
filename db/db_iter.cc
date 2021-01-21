@@ -166,41 +166,21 @@ bool DBIter::ParseKey(ParsedInternalKey* ikey) {
   }
 }
 
-void DBIter::NextAsync(AsyncContext& context) {
-  assert(valid_);
-  assert(status_.ok());
+void DBIter::NextDone(AsyncContext& context) {
+  iter_.Update();
+  NextCallback(context);
+}
 
-  // Release temporarily pinned blocks from last operation
-  ReleaseTempPinnedData();
-  local_stats_.skip_count_ += num_internal_keys_skipped_;
-  local_stats_.skip_count_--;
-  num_internal_keys_skipped_ = 0;
-  bool ok = true;
-  if (direction_ == kReverse) {
-    is_key_seqnum_zero_ = false;
-    if (!ReverseToForward()) { // TODO chenxu14 async this
-      ok = false;
-    }
-  } else if (!current_entry_is_merged_) {
-    // If the current value is not a merge, the iter position is the
-    // current key, which is already returned. We can safely issue a
-    // Next() without checking the current key.
-    // If the current key is a merge, very likely iter already points
-    // to the next internal position.
-    assert(iter_.Valid());
-    iter_.Next(); // DOING
-    PERF_COUNTER_ADD(internal_key_skipped_count, 1);
-  }
-
+void DBIter::NextCallback(AsyncContext& context) {
   local_stats_.next_count_++;
-  if (ok && iter_.Valid()) {
+  if (iter_.Valid()) {
     Slice prefix;
     if (prefix_same_as_start_) {
       assert(prefix_extractor_ != nullptr);
       prefix = prefix_.GetUserKey();
     }
     FindNextUserEntry(true /* skipping the current user key */,
-        prefix_same_as_start_ ? &prefix : nullptr);
+        prefix_same_as_start_ ? &prefix : nullptr); // TODO chenxu async this
   } else {
     is_key_seqnum_zero_ = false;
     valid_ = false;
@@ -210,6 +190,35 @@ void DBIter::NextAsync(AsyncContext& context) {
     local_stats_.bytes_read_ += (key().size() + value().size());
   }
   context.scan.next_callback(context);
+}
+
+void DBIter::NextAsync(AsyncContext& context) {
+  assert(valid_);
+  assert(status_.ok());
+
+  // Release temporarily pinned blocks from last operation
+  ReleaseTempPinnedData();
+  local_stats_.skip_count_ += num_internal_keys_skipped_;
+  local_stats_.skip_count_--;
+  num_internal_keys_skipped_ = 0;
+  if (direction_ == kReverse) {
+    is_key_seqnum_zero_ = false;
+    if (!ReverseToForward()) { // TODO chenxu14 async this
+      local_stats_.next_count_++;
+      valid_ = false;
+      return context.scan.next_callback(context);
+    }
+  } else if (!current_entry_is_merged_) {
+    // If the current value is not a merge, the iter position is the
+    // current key, which is already returned. We can safely issue a
+    // Next() without checking the current key.
+    // If the current key is a merge, very likely iter already points
+    // to the next internal position.
+    assert(iter_.Valid());
+    context.scan.merging_iter_cb = this;
+    return iter_.NextAsync(context);
+  }
+  NextCallback(context);
 }
 
 void DBIter::Next() {

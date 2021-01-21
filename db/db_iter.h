@@ -186,6 +186,7 @@ class DBIter final : public Iterator, public IteratorCallback {
 
   void Next() final override;
   void NextAsync(AsyncContext& context) final override;
+  void NextDone(AsyncContext& context) final override;
   void SeekDone(AsyncContext& context) final override;
   void Prev() final override;
   void Seek(const Slice& target) final override;
@@ -233,6 +234,8 @@ class DBIter final : public Iterator, public IteratorCallback {
   void PrevInternal(const Slice* /*prefix*/);
   bool TooManyInternalKeysSkipped(bool increment = true);
   bool IsVisible(SequenceNumber sequence);
+
+  void NextCallback(AsyncContext& context);
 
   // Temporarily pin the blocks that we encounter until ReleaseTempPinnedData()
   // is called

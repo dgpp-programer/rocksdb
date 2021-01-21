@@ -562,11 +562,12 @@ class IndexBlockLazyInitIter : public InternalIteratorBase<IndexValue>, public A
   void SeekToFirst() override {}
   void SeekToLast() override {}
   void Prev() override { assert(false); }
-  void NextAsync(AsyncContext&) override {}
+  void NextAsync(AsyncContext& context) override;
   void RetrieveBlockDone(AsyncContext& context) override;
 private:
  const BlockBasedTable* table_;
  InternalIteratorBase<IndexValue>* inner_iter_;
+ void InitInnerIter(AsyncContext& context);
 };
 
 // Stores all the properties associated with a BlockBasedTable.
@@ -744,8 +745,11 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
           lookup_context_(context->reader.lookup_context->caller),
           compaction_readahead_size_(compaction_readahead_size) {}
 
-  ~BlockBasedTableIterator() { delete index_iter_; }
+  virtual ~BlockBasedTableIterator() { delete index_iter_; }
 
+  virtual void IteratorDone();
+  virtual void SeekIndexAsync();
+  virtual void NextIndexAsync();
   void RetrieveBlockDone(AsyncContext& context) override;
   /**
    * callback of index_iter
@@ -758,6 +762,10 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
   void SeekToLast() override;
   void Next() final override;
   void NextAsync(AsyncContext& context) override;
+  /**
+   * callback of index_iter
+   */
+  void NextDone(AsyncContext& context) override;
   bool NextAndGetResult(IterateResult* result) override;
   void Prev() override;
   bool Valid() const override {
@@ -833,7 +841,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
            block_iter_points_to_real_block_;
   }
 
-  bool CheckPrefixMayMatch(const Slice& ikey) {
+  bool CheckPrefixMayMatch(const Slice& ikey) { // TODO chenxu14 async this
     if (check_filter_ &&
         !table_->PrefixMayMatch(ikey, read_options_, prefix_extractor_,
                                 need_upper_bound_check_, &lookup_context_)) {
@@ -865,7 +873,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
     }
   }
 
- private:
+ protected:
   const BlockBasedTable* table_;
   AsyncContext* context_;
   const ReadOptions read_options_;
@@ -923,13 +931,26 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
   void FindBlockForwardCallback();
   void FindKeyBackward();
   void CheckOutOfBound();
-  void IteratorDone();
 
   // Check if data block is fully within iterate_upper_bound.
   //
   // Note MyRocks may update iterate bounds between seek. To workaround it,
   // we need to check and update data_block_within_upper_bound_ accordingly.
   void CheckDataBlockWithinUpperBound();
+};
+
+class BlockBasedTableIndexIterator : public BlockBasedTableIterator<IndexBlockIter, IndexValue> {
+  public:
+    BlockBasedTableIndexIterator(const BlockBasedTable* table, AsyncContext* context,
+        const InternalKeyComparator& icomp, InternalIteratorBase<IndexValue>* index_iter,
+        bool check_filter, bool need_upper_bound_check, const SliceTransform* prefix_extractor,
+        BlockType block_type, size_t compaction_readahead_size = 0)
+    : BlockBasedTableIterator(table, context, icomp, index_iter, check_filter,
+        need_upper_bound_check, prefix_extractor, block_type, compaction_readahead_size) {}
+
+    void IteratorDone() override;
+    void SeekIndexAsync() override;
+    void NextIndexAsync() override;
 };
 
 }  // namespace rocksdb

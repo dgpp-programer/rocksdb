@@ -74,7 +74,7 @@ class InternalIteratorBase : public Cleanable {
   virtual void Next() = 0;
   virtual void NextAsync(AsyncContext& context) {
     Next();
-    context.reader.iter_cb->SeekDone(context);
+    context.reader.iter_cb->NextDone(context);
   }
 
   // Moves to the next entry in the source, and return result. Iterator

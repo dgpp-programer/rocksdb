@@ -1765,9 +1765,6 @@ void Version::IterateNextFile(AsyncContext& context) {
 
   auto cur_version = context.version.sv->current;
   auto cfd_tmp = context.version.cfd;
-  if (!context.reader.prefix_extractor) {
-    context.reader.prefix_extractor = cur_version->mutable_cf_options_.prefix_extractor;
-  }
   context.reader.skip_filters = IsFilterSkipped(static_cast<int>(
       context.version.fp->GetHitFileLevel()), context.version.fp->IsHitFileLastInLevel());
   cfd_tmp->table_cache()->GetAsync(context, *cur_version->internal_comparator(),

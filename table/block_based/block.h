@@ -561,9 +561,9 @@ class IndexBlockIter final : public BlockIter<IndexValue> {
 
   virtual void Next() override;
 
-  virtual void NextAsync(AsyncContext& context) { // DOING
+  virtual void NextAsync(AsyncContext& context) override {
     Next();
-    context.reader.index_iter_cb->SeekDone(context);
+    context.reader.index_iter_cb->NextDone(context);
   }
 
   virtual void SeekToFirst() override;

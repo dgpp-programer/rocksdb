@@ -56,6 +56,9 @@ class IteratorCallback {
 public:
   virtual ~IteratorCallback() = default;
   virtual void SeekDone(AsyncContext&) = 0;
+  virtual void NextDone(AsyncContext& context) {
+    SeekDone(context);
+  }
 };
 
 typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
@@ -109,7 +112,6 @@ struct AsyncContext {
     bool key_may_match;
     bool skip_filters;
     bool skip_seek; // when build iterator, no need to do index seek
-    bool two_level_index_seek;
     bool for_compaction;
     bool read_contents_no_cache;
     bool second_level; // used by PartitionedFilterBlockReader
@@ -123,12 +125,13 @@ struct AsyncContext {
     Slice ckey;
     UncompressionDict* uncompression_dict;
     std::unique_ptr<BlockCacheLookupContext> lookup_context;
-    std::shared_ptr<const SliceTransform> prefix_extractor; // TODO context->version.sv->mutable_cf_options.prefix_extractor.get()
     std::unique_ptr<BlockFetcher> block_fetcher;
     std::unique_ptr<BlockContents> raw_block_contents;
     AsyncCallback* async_cb;
     IteratorCallback* iter_cb;
+    bool iter_seek;
     IteratorCallback* index_iter_cb;
+    bool index_iter_seek;
     union {
       std::unique_ptr<CachableEntry<Generic>> cache_entry;
       std::unique_ptr<CachableEntry<BlockContents>> contents; // BlockBasedFilterBlockReader

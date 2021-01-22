@@ -208,7 +208,7 @@ InternalIterator* TableCache::NewIterator(
       result = NewEmptyInternalIterator<Slice>(arena);
     } else {
       if (context) {
-        context->reader.lookup_context.reset(new BlockCacheLookupContext(caller));
+        context->read.lookup_context.reset(new BlockCacheLookupContext(caller));
         result = table_reader->NewAsyncIterator(context, prefix_extractor, arena,
             skip_filters, file_options.compaction_readahead_size);
       } else {
@@ -357,10 +357,10 @@ bool TableCache::GetFromRowCache(const Slice& user_key, IterKey& row_cache_key,
 #endif  // ROCKSDB_LITE
 
 void TableCache::GetAsyncCallback(AsyncContext& context) {
-  if (context.cache.handle != nullptr) {
-    ReleaseHandle(context.cache.handle);
+  if (context.op.get.args.cache_handle != nullptr) {
+    ReleaseHandle(context.op.get.args.cache_handle);
   }
-  context.version.sv->current->GetAsyncDone(context);
+  context.read.sv->current->GetAsyncDone(context);
 }
 
 void TableCache::GetAsync(AsyncContext& context,
@@ -370,20 +370,20 @@ void TableCache::GetAsync(AsyncContext& context,
   auto& fd = file_meta.fd;
 
   TableReader* t = fd.table_reader;
-  context.cache.handle = nullptr;
+  context.op.get.args.cache_handle = nullptr;
   if (context.status.ok()) {
     if (t == nullptr) {
       context.status = FindTable(
-          file_options_, internal_comparator, fd, &context.cache.handle,
-          context.version.sv->mutable_cf_options.prefix_extractor.get(),
+          file_options_, internal_comparator, fd, &context.op.get.args.cache_handle,
+          context.read.sv->mutable_cf_options.prefix_extractor.get(),
           context.options->read_tier == kBlockCacheTier /* no_io */,
           true /* record_read_stats */, file_read_hist,
-          context.reader.skip_filters, level);
+          context.read.skip_filters, level);
       if (context.status.ok()) {
-        t = GetTableReaderFromHandle(context.cache.handle);
+        t = GetTableReaderFromHandle(context.op.get.args.cache_handle);
       }
     }
-    SequenceNumber* max_covering_tombstone_seq = context.version.getCtx->max_covering_tombstone_seq();
+    SequenceNumber* max_covering_tombstone_seq = context.read.getCtx->max_covering_tombstone_seq();
     if (context.status.ok() && max_covering_tombstone_seq != nullptr &&
         !context.options->ignore_range_deletions) {
       std::unique_ptr<FragmentedRangeTombstoneIterator> range_del_iter(
@@ -392,14 +392,13 @@ void TableCache::GetAsync(AsyncContext& context,
         *max_covering_tombstone_seq = std::max(
             *max_covering_tombstone_seq,
             range_del_iter->MaxCoveringTombstoneSeqnum(
-                ExtractUserKey(context.version.key_info.internal_key)));
+                ExtractUserKey(context.read.key_info.internal_key)));
       }
     }
     if (context.status.ok()) {
-      context.cache.table_cache = this;
       return t->GetAsync(context);
     } else if (context.options->read_tier == kBlockCacheTier && context.status.IsIncomplete()) {
-      context.version.getCtx->MarkKeyMayExist();
+      context.read.getCtx->MarkKeyMayExist();
       context.status = Status::OK();
     }
   }

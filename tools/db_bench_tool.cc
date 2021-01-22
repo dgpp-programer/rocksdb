@@ -4911,24 +4911,24 @@ class Benchmark {
     DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
     PinnableSlice pinnable_val;
     ctx->options = &options;
-    ctx->get.cf = db_with_cfh->db->DefaultColumnFamily();
-    ctx->get.value = &pinnable_val;
-    ctx->get.callback = [&](AsyncContext& ctx_) {
-      if (!ctx_.status.ok()) {
-        fprintf(stderr, "Get returned an error: %s\n", ctx_.status.ToString().c_str());
+    ctx->cf = db_with_cfh->db->DefaultColumnFamily();
+    ctx->op.get.value = &pinnable_val;
+    ctx->op.get.callback = [&](AsyncContext&) {
+      if (!ctx->status.ok()) {
+        fprintf(stderr, "Get returned an error: %s\n", ctx->status.ToString().c_str());
       } else {
-        bytes += ctx_.get.key->size() + ctx_.get.value->size();
+        bytes += ctx->op.get.key->size() + ctx->op.get.value->size();
         fprintf(stdout, "total read bytes : %ld, current key is %s, current value is %s. \n", bytes,
-            ctx_.get.key->ToString(true).c_str(), ctx_.get.value->ToString(true).c_str());
+            ctx->op.get.key->ToString(true).c_str(), ctx->op.get.value->ToString(true).c_str());
       }
-      ctx_.get.value->Reset();
-      thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, ctx_.get.start_time);
+      ctx->op.get.value->Reset();
+      thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, ctx->start_time);
       complete++;
     };
     GenerateKeyFromInt(key_rand, FLAGS_num, &key);
     key_rand = GetRandomKey(&thread->rand);
-    ctx->get.key = &key;
-    ctx->get.start_time = FLAGS_env->NowMicros();
+    ctx->op.get.key = &key;
+    ctx->start_time = FLAGS_env->NowMicros();
     db_with_cfh->db->GetAsync(*ctx);
 
     struct spdk_poller *poller;
@@ -4967,24 +4967,24 @@ class Benchmark {
     for (int i = 0; i < parallel; i++) {
       PinnableSlice pinnable_val;
       ctx[i].options = &options;
-      ctx[i].get.cf = db_with_cfh->db->DefaultColumnFamily();
-      ctx[i].get.value = &pinnable_val;
-      ctx[i].get.callback = [&](AsyncContext& ctx_) {
-        if (!ctx_.status.ok()) {
-          fprintf(stderr, "Get returned an error: %s\n", ctx_.status.ToString().c_str());
+      ctx[i].cf = db_with_cfh->db->DefaultColumnFamily();
+      ctx[i].op.get.value = &pinnable_val;
+      ctx[i].op.get.callback = [&](AsyncContext& context) {
+        if (!context.status.ok()) {
+          fprintf(stderr, "Get returned an error: %s\n", context.status.ToString().c_str());
         } else {
           found++;
-          bytes += ctx_.get.key->size() + ctx_.get.value->size();
-          // fprintf(stdout, "total read bytes : %ld, current key is %s. \n", bytes, ctx_.get.key->ToString(true).c_str());
+          bytes += context.op.get.key->size() + context.op.get.value->size();
+          // fprintf(stdout, "total read bytes : %ld, current key is %s. \n", bytes, context.op.get.key->ToString(true).c_str());
         }
-        ctx_.get.value->Reset();
-        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, ctx_.get.start_time);
+        context.op.get.value->Reset();
+        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, context.start_time);
         if (!duration.Done(1)) {
           GenerateKeyFromInt(key_rand, FLAGS_num, &key);
           key_rand = GetRandomKey(&thread->rand);
-          ctx_.get.key = &key;
-          ctx_.get.start_time = FLAGS_env->NowMicros();
-          db_with_cfh->db->GetAsync(ctx_);
+          context.op.get.key = &key;
+          context.start_time = FLAGS_env->NowMicros();
+          db_with_cfh->db->GetAsync(context);
           summit++;
         }
         complete++;
@@ -4992,8 +4992,8 @@ class Benchmark {
 
       GenerateKeyFromInt(key_rand, FLAGS_num, &key);
       key_rand = GetRandomKey(&thread->rand);
-      ctx[i].get.key = &key;
-      ctx[i].get.start_time = FLAGS_env->NowMicros();
+      ctx[i].op.get.key = &key;
+      ctx[i].start_time = FLAGS_env->NowMicros();
       db_with_cfh->db->GetAsync(ctx[i]);
       summit++;
     }

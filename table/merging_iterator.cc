@@ -109,7 +109,7 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
   }
 
   void SeekDone(AsyncContext& context) override {
-    auto child = &children_[context.scan.child_index];
+    auto child = &children_[context.op.scan.args.child_index];
     child->Update();
     PERF_COUNTER_ADD(seek_child_seek_count, 1);
     {
@@ -118,9 +118,9 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
       PERF_TIMER_GUARD(seek_min_heap_time);
       AddToMinHeapOrCheckStatus(child);
     }
-    context.scan.child_index++;
-    if (context.scan.child_index < children_.size()) {
-      child = &children_[context.scan.child_index];
+    context.op.scan.args.child_index++;
+    if (context.op.scan.args.child_index < children_.size()) {
+      child = &children_[context.op.scan.args.child_index];
       child->SeekAsync(context);
     } else { // all child has been seeked
       direction_ = kForward;
@@ -128,22 +128,22 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
         PERF_TIMER_GUARD(seek_min_heap_time);
         current_ = CurrentForward();
       }
-      context.scan.merging_iter_cb->SeekDone(context);
+      context.op.scan.args.merging_iter_cb->SeekDone(context);
     }
   }
 
-  // method call this should specify context.scan.merging_iter_cb
+  // method call this should specify scan.merging_iter_cb
   void SeekAsync(AsyncContext& context) override {
     if (children_.size() > 0) {
       ClearHeaps();
       context.status = Status::OK();
-      context.reader.iter_cb = this;
-      context.reader.iter_seek = true;
-      context.scan.child_index = 0;
-      auto child = &children_[context.scan.child_index];
+      context.op.scan.args.iter_cb = this;
+      context.op.scan.args.iter_seek = true;
+      context.op.scan.args.child_index = 0;
+      auto child = &children_[context.op.scan.args.child_index];
       child->SeekAsync(context);
     } else {
-      context.scan.merging_iter_cb->SeekDone(context);
+      context.op.scan.args.merging_iter_cb->SeekDone(context);
     }
   }
 
@@ -239,7 +239,7 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
       minHeap_.pop();
     }
     current_ = CurrentForward();
-    context.scan.merging_iter_cb->NextDone(context);
+    context.op.scan.args.merging_iter_cb->NextDone(context);
   }
 
   void NextAsync(AsyncContext& context) override {
@@ -249,8 +249,8 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
       assert(current_ == CurrentForward());
     }
     assert(current_ == CurrentForward());
-    context.reader.iter_cb = this;
-    context.reader.iter_seek = false;
+    context.op.scan.args.iter_cb = this;
+    context.op.scan.args.iter_seek = false;
     current_->NextAsync(context);
   }
 

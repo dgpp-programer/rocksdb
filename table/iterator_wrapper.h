@@ -87,7 +87,7 @@ class IteratorWrapperBase {
   }
 
   /**
-   * method call this should specify context.reader.iter_cb,
+   * method call this should specify context.op.scan.args.iter_cb,
    * and call IteratorWrapperBase::Update() in SeekDone
    */
   void SeekAsync(AsyncContext& context) {

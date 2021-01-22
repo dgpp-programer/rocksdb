@@ -567,30 +567,30 @@ bool DataBlockIter::ParseNextDataKey(const char* limit) {
 }
 
 void IndexBlockIter::SeekAsync(AsyncContext& context) {
-  Slice seek_key = context.version.key_info.internal_key;
+  Slice seek_key = context.read.key_info.internal_key;
   if (!key_includes_seq_) {
-    seek_key = ExtractUserKey(context.version.key_info.internal_key);
+    seek_key = ExtractUserKey(context.read.key_info.internal_key);
   }
   if (data_ == nullptr) {  // Not init yet
-    return context.reader.index_iter_cb->SeekDone(context);
+    return context.read.index_iter_cb->SeekDone(context);
   }
   uint32_t index = 0;
   bool ok = false;
   if (prefix_index_) {
-    ok = PrefixSeek(context.version.key_info.internal_key, &index);
+    ok = PrefixSeek(context.read.key_info.internal_key, &index);
   } else if (value_delta_encoded_) {
     ok = BinarySeek<DecodeKeyV4>(seek_key, 0, num_restarts_ - 1, &index, comparator_);
   } else {
     ok = BinarySeek<DecodeKey>(seek_key, 0, num_restarts_ - 1, &index, comparator_);
   }
   if (!ok) {
-    return context.reader.index_iter_cb->SeekDone(context);
+    return context.read.index_iter_cb->SeekDone(context);
   }
   SeekToRestartPoint(index);
   // Linear search (within restart block) for first key >= target
   while (true) {
     if (!ParseNextIndexKey() || Compare(key_, seek_key) >= 0) {
-      return context.reader.index_iter_cb->SeekDone(context);
+      return context.read.index_iter_cb->SeekDone(context);
     }
   }
 }

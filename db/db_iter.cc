@@ -95,15 +95,15 @@ DBIter::DBIter(Env* _env, const ReadOptions& read_options,
 DBIter::DBIter(AsyncContext* context, InternalIterator* iter, SequenceNumber s,
     bool allow_blob, bool arena_mode)
     : context_(context),
-      prefix_extractor_(context->version.sv->mutable_cf_options.prefix_extractor.get()),
-      env_(context->version.db_impl->GetEnv()),
-      logger_(context->version.cfd->ioptions()->info_log),
-      user_comparator_(context->version.cfd->user_comparator()),
-      merge_operator_(context->version.cfd->ioptions()->merge_operator),
+      prefix_extractor_(context->read.sv->mutable_cf_options.prefix_extractor.get()),
+      env_(context->read.db_impl->GetEnv()),
+      logger_(context->read.cfd->ioptions()->info_log),
+      user_comparator_(context->read.cfd->user_comparator()),
+      merge_operator_(context->read.cfd->ioptions()->merge_operator),
 	  iter_(iter),
-      read_callback_(context->scan.read_cb),
+      read_callback_(context->op.scan.args.read_cb),
       sequence_(s),
-      statistics_(context->version.cfd->ioptions()->statistics),
+      statistics_(context->read.cfd->ioptions()->statistics),
       num_internal_keys_skipped_(0),
       iterate_lower_bound_(context->options->iterate_lower_bound),
       iterate_upper_bound_(context->options->iterate_upper_bound),
@@ -111,19 +111,19 @@ DBIter::DBIter(AsyncContext* context, InternalIterator* iter, SequenceNumber s,
       valid_(false),
       current_entry_is_merged_(false),
       is_key_seqnum_zero_(false),
-      prefix_same_as_start_(context->version.sv->mutable_cf_options.prefix_extractor
+      prefix_same_as_start_(context->read.sv->mutable_cf_options.prefix_extractor
           ? context->options->prefix_same_as_start : false),
       pin_thru_lifetime_(context->options->pin_data),
       total_order_seek_(context->options->total_order_seek),
       allow_blob_(allow_blob),
       is_blob_(false),
       arena_mode_(arena_mode),
-      range_del_agg_(&context->version.cfd->ioptions()->internal_comparator, s),
-      db_impl_(context->version.db_impl),
-      cfd_(context->version.cfd),
+      range_del_agg_(&context->read.cfd->ioptions()->internal_comparator, s),
+      db_impl_(context->read.db_impl),
+      cfd_(context->read.cfd),
       start_seqnum_(context->options->iter_start_seqnum) {
   RecordTick(statistics_, NO_ITERATOR_CREATED);
-  max_skip_ = context->version.sv->mutable_cf_options.max_sequential_skip_in_iterations;
+  max_skip_ = context->read.sv->mutable_cf_options.max_sequential_skip_in_iterations;
   max_skippable_internal_keys_ = context->options->max_skippable_internal_keys;
   if (pin_thru_lifetime_) {
     pinned_iters_mgr_.StartPinning();
@@ -166,9 +166,9 @@ bool DBIter::ParseKey(ParsedInternalKey* ikey) {
   }
 }
 
-void DBIter::NextDone(AsyncContext& context) {
+void DBIter::NextDone(AsyncContext&) {
   iter_.Update();
-  NextCallback(context);
+  NextCallback(*context_);
 }
 
 void DBIter::NextCallback(AsyncContext& context) {
@@ -189,7 +189,7 @@ void DBIter::NextCallback(AsyncContext& context) {
     local_stats_.next_found_count_++;
     local_stats_.bytes_read_ += (key().size() + value().size());
   }
-  context.scan.next_callback(context);
+  context.op.scan.next_callback(context);
 }
 
 void DBIter::NextAsync(AsyncContext& context) {
@@ -206,7 +206,7 @@ void DBIter::NextAsync(AsyncContext& context) {
     if (!ReverseToForward()) { // TODO chenxu14 async this
       local_stats_.next_count_++;
       valid_ = false;
-      return context.scan.next_callback(context);
+      return context.op.scan.next_callback(context);
     }
   } else if (!current_entry_is_merged_) {
     // If the current value is not a merge, the iter position is the
@@ -215,7 +215,7 @@ void DBIter::NextAsync(AsyncContext& context) {
     // If the current key is a merge, very likely iter already points
     // to the next internal position.
     assert(iter_.Valid());
-    context.scan.merging_iter_cb = this;
+    context.op.scan.args.merging_iter_cb = this;
     return iter_.NextAsync(context);
   }
   NextCallback(context);
@@ -1193,14 +1193,14 @@ void DBIter::SetSavedKeyToSeekForPrevTarget(const Slice& target) {
   }
 }
 
-void DBIter::SeekDone(AsyncContext& context) {
+void DBIter::SeekDone(AsyncContext&) {
   iter_.Update();
   range_del_agg_.InvalidateRangeDelMapPositions();
   RecordTick(statistics_, NUMBER_DB_SEEK);
 
   if (!iter_.Valid()) {
     valid_ = false;
-    return context.scan.seek_callback(context);
+    return context_->op.scan.seek_callback(*context_);
   }
   direction_ = kForward;
 
@@ -1213,7 +1213,7 @@ void DBIter::SeekDone(AsyncContext& context) {
     // keys within the same prefix of the seek key.
     assert(prefix_extractor_ != nullptr);
     Slice target_prefix;
-    target_prefix = prefix_extractor_->Transform(*context.scan.startKey);
+    target_prefix = prefix_extractor_->Transform(*context_->op.scan.startKey);
     FindNextUserEntry(false /* not skipping saved_key */, &target_prefix /* prefix */);
     if (valid_) {
       // Remember the prefix of the seek key for the future Prev() call to check.
@@ -1223,7 +1223,7 @@ void DBIter::SeekDone(AsyncContext& context) {
     FindNextUserEntry(false /* not skipping saved_key */, nullptr);
   }
   if (!valid_) {
-    return context.scan.seek_callback(context);
+    return context_->op.scan.seek_callback(*context_);
   }
 
   // Updating stats and perf context counters.
@@ -1233,11 +1233,11 @@ void DBIter::SeekDone(AsyncContext& context) {
     RecordTick(statistics_, ITER_BYTES_READ, key().size() + value().size());
   }
   PERF_COUNTER_ADD(iter_read_bytes, key().size() + value().size());
-  context.scan.seek_callback(context);
+  context_->op.scan.seek_callback(*context_);
 }
 
 void DBIter::SeekAsync(AsyncContext& context) {
-  auto target = *context.scan.startKey;
+  auto target = *context.op.scan.startKey;
   PERF_CPU_TIMER_GUARD(iter_seek_cpu_nanos, env_);
   StopWatch sw(env_, statistics_, DB_SEEK);
 
@@ -1253,9 +1253,9 @@ void DBIter::SeekAsync(AsyncContext& context) {
 
   // Seek the inner iterator based on the target key.
   SetSavedKeyToSeekTarget(target);
-  context.version.key_info.internal_key = saved_key_.GetInternalKey();
+  context.read.key_info.internal_key = saved_key_.GetInternalKey();
   // iter_ is MergingIterator, when call SeekAsync we should specify scan.merging_iter_cb
-  context.scan.merging_iter_cb = this;
+  context.op.scan.args.merging_iter_cb = this;
   iter_.SeekAsync(context);
 }
 

@@ -1437,10 +1437,10 @@ InternalIterator* DBImpl::NewAsyncSupportInternalIterator(AsyncContext& context,
   InternalIterator* internal_iter;
   assert(arena != nullptr);
   assert(range_del_agg != nullptr);
-  auto super_version = context.version.sv;
+  auto super_version = context.read.sv;
   // Need to create internal iterator from the arena.
   MergeIteratorBuilder merge_iter_builder(
-      &context.version.cfd->internal_comparator(), arena,
+      &context.read.cfd->internal_comparator(), arena,
       !context.options->total_order_seek &&
 	  super_version->mutable_cf_options.prefix_extractor != nullptr);
   // Collect iterator for mutable mem
@@ -1551,56 +1551,56 @@ Status DBImpl::Get(const ReadOptions& read_options,
 }
 
 void DBImpl::GetAsyncCallBack(AsyncContext& context) {
-  ReturnAndCleanupSuperVersion(context.version.cfd, context.version.sv);
+  ReturnAndCleanupSuperVersion(context.read.cfd, context.read.sv);
   RecordTick(stats_, NUMBER_KEYS_READ);
   size_t size = 0;
   if (context.status.ok()) {
-    size = context.get.value->size();
+    size = context.op.get.value->size();
     RecordTick(stats_, BYTES_READ, size);
     PERF_COUNTER_ADD(get_read_bytes, size);
   }
   RecordInHistogram(stats_, BYTES_PER_READ, size);
-  context.get.callback(context);
+  context.op.get.callback(context);
 }
 
 void DBImpl::GetAsync(AsyncContext& context) {
-  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.get.cf);
-  context.version.cfd = cfh->cfd();
-  context.version.sv = GetAndRefSuperVersion(context.version.cfd);
+  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.cf);
+  context.read.cfd = cfh->cfd();
+  context.read.sv = GetAndRefSuperVersion(context.read.cfd);
   ReadOptions* read_options = context.options;
   SequenceNumber snapshot = last_seq_same_as_publish_seq_
       ? versions_->LastSequence() : versions_->LastPublishedSequence();
-  context.version.merge_context.reset(new MergeContext());
-  context.version.max_covering_tombstone_seq = 0;
-  context.version.key_info.lkey.reset(new LookupKey(*context.get.key, snapshot, read_options->timestamp));
-  context.version.key_info.internal_key = context.version.key_info.lkey->internal_key();
-  context.version.key_info.user_key = context.version.key_info.lkey->user_key();
+  context.op.get.args.merge_context.reset(new MergeContext());
+  context.op.get.args.max_covering_tombstone_seq = 0;
+  context.read.key_info.lkey.reset(new LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+  context.read.key_info.internal_key = context.read.key_info.lkey->internal_key();
+  context.read.key_info.user_key = context.read.key_info.lkey->user_key();
 
   bool skip_memtable = (read_options->read_tier == kPersistedTier &&
       has_unpersisted_data_.load(std::memory_order_relaxed));
   bool done = false;
   if (!skip_memtable) {
-    if (context.version.sv->mem->Get(*context.version.key_info.lkey, context.get.value->GetSelf(), &context.status,
-        context.version.merge_context.get(), &context.version.max_covering_tombstone_seq, *read_options)) {
+    if (context.read.sv->mem->Get(*context.read.key_info.lkey, context.op.get.value->GetSelf(), &context.status,
+        context.op.get.args.merge_context.get(), &context.op.get.args.max_covering_tombstone_seq, *read_options)) {
       done = true;
-      context.get.value->PinSelf();
+      context.op.get.value->PinSelf();
       RecordTick(stats_, MEMTABLE_HIT);
     } else if ((context.status.ok() || context.status.IsMergeInProgress()) &&
-      context.version.sv->imm->Get(*context.version.key_info.lkey, context.get.value->GetSelf(), &context.status,
-            context.version.merge_context.get(), &context.version.max_covering_tombstone_seq, *read_options)) {
+      context.read.sv->imm->Get(*context.read.key_info.lkey, context.op.get.value->GetSelf(), &context.status,
+            context.op.get.args.merge_context.get(), &context.op.get.args.max_covering_tombstone_seq, *read_options)) {
       done = true;
-      context.get.value->PinSelf();
+      context.op.get.value->PinSelf();
       RecordTick(stats_, MEMTABLE_HIT);
     }
     if (!done && !context.status.ok() && !context.status.IsMergeInProgress()) {
-      ReturnAndCleanupSuperVersion(context.version.cfd, context.version.sv);
+      ReturnAndCleanupSuperVersion(context.read.cfd, context.read.sv);
       return;
     }
   }
 
   if (!done) {
-    context.version.db_impl = this;
-    context.version.sv->current->GetAsync(context);
+    context.read.db_impl = this;
+    context.read.sv->current->GetAsync(context);
     RecordTick(stats_, MEMTABLE_MISS);
   } else {
     GetAsyncCallBack(context);
@@ -2563,7 +2563,7 @@ bool DBImpl::KeyMayExist(const ReadOptions& read_options,
 }
 
 Iterator* DBImpl::NewAsyncIterator(AsyncContext& context) {
-  context.version.db_impl = this;
+  context.read.db_impl = this;
   if (context.options->managed) {
     return NewErrorIterator(
         Status::NotSupported("Managed iterator is not supported anymore."));
@@ -2582,17 +2582,17 @@ Iterator* DBImpl::NewAsyncIterator(AsyncContext& context) {
         "Iterator requested internal keys which are too old and are not"
         " guaranteed to be preserved, try larger iter_start_seqnum opt."));
   }
-  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.get.cf);
-  context.version.cfd = cfh->cfd();
+  auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(context.cf);
+  context.read.cfd = cfh->cfd();
   if (context.options->tailing) { // TODO chenxu14 UT test this
 #ifdef ROCKSDB_LITE
     // not supported in lite version
     result = nullptr;
 #else
-    context.version.sv = context.version.cfd->GetReferencedSuperVersion(this);
-    context.scan.read_cb = nullptr;
+    context.read.sv = context.read.cfd->GetReferencedSuperVersion(this);
+    context.op.scan.args.read_cb = nullptr;
     auto iter = new ForwardIterator(this, *context.options,
-        context.version.cfd, context.version.sv);
+        context.read.cfd, context.read.sv);
     result = new DBIter(&context, iter, kMaxSequenceNumber, false, false);
 #endif
   } else {
@@ -2654,8 +2654,8 @@ ArenaWrappedDBIter* DBImpl::NewAsyncSupportIterator(AsyncContext& context, bool 
       bool allow_refresh) {
   auto snapshot = context.options->snapshot != nullptr
       ? context.options->snapshot->GetSequenceNumber() : versions_->LastSequence();
-  context.scan.read_cb = nullptr;
-  context.version.sv = context.version.cfd->GetReferencedSuperVersion(this);
+  context.op.scan.args.read_cb = nullptr;
+  context.read.sv = context.read.cfd->GetReferencedSuperVersion(this);
   ArenaWrappedDBIter* db_iter = NewArenaWrappedDbIterator(context, snapshot, allow_blob,
       ((context.options->snapshot != nullptr) ? false : allow_refresh));
   InternalIterator* internal_iter = NewAsyncSupportInternalIterator(context,

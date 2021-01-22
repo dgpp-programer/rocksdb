@@ -64,86 +64,95 @@ public:
 typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
 
 // TODO make sure all pointer refer to no function variable
+
+struct ReadContext {
+  DBImpl* db_impl;
+  ColumnFamilyData *cfd;
+  SuperVersion* sv;
+  std::unique_ptr<GetContext> getCtx;
+  struct {
+    std::unique_ptr<LookupKey> lkey;
+    Slice internal_key;
+    Slice user_key;
+  } key_info;
+  bool key_may_match;
+  bool skip_filters;
+  bool skip_seek; // when build iterator, no need to do index seek
+  bool for_compaction;
+  bool read_contents_no_cache;
+  bool second_level; // used by PartitionedFilterBlockReader
+  uint64_t block_offset;
+  BlockType block_type;
+  FilePrefetchBuffer* prefetch_buffer;
+  BlockHandle* handle;
+  char* cache_key; // TODO when to delete
+  char* compressed_cache_key;
+  Slice key;
+  Slice ckey;
+  UncompressionDict* uncompression_dict;
+  std::unique_ptr<BlockCacheLookupContext> lookup_context;
+  std::unique_ptr<BlockFetcher> block_fetcher;
+  std::unique_ptr<BlockContents> raw_block_contents;
+  AsyncCallback* async_cb;
+  IteratorCallback* index_iter_cb;
+  bool index_iter_seek;
+  union {
+    std::unique_ptr<CachableEntry<Generic>> cache_entry;
+    std::unique_ptr<CachableEntry<BlockContents>> contents;
+    std::unique_ptr<CachableEntry<Block>> block;
+    std::unique_ptr<CachableEntry<ParsedFullFilterBlock>> full_filter_block;
+  } retrieve_block;
+  std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
+  std::unique_ptr<DataBlockIter> data_iter;
+  // used by RetrieveBlockAsync
+  uint64_t offset;
+  uint64_t length;
+  Slice* result;
+  char* scratch;
+  read_complete_cb read_complete;
+};
+
+struct GetContextArgs {
+  SequenceNumber max_covering_tombstone_seq;
+  std::unique_ptr<PinnedIteratorsManager> pinned_iters_mgr;
+  std::unique_ptr<MergeContext> merge_context;
+  std::unique_ptr<FilePicker> fp;
+  Cache::Handle* cache_handle;
+};
+
+struct ScanContextArgs {
+  uint64_t child_index;
+  IteratorCallback* merging_iter_cb;
+  ReadCallback* read_cb;
+  IteratorCallback* iter_cb;
+  bool iter_seek;
+};
+
+/**
+ * NOT THREAD SAFE
+ * Can only be used by one thread at a time
+ * TODO chenxu14 cache line align
+ */
 struct AsyncContext {
-  struct {
-    Slice* key;
-    PinnableSlice* value;
-    ColumnFamilyHandle* cf;
-    uint64_t offset;
-    uint64_t length;
-    uint64_t start_time;
-    Slice* result;
-    char* scratch;
-    read_complete_cb read_complete;
-    std::function<void(AsyncContext&)> callback;
-  } get;
-
-  struct {
-    Slice* startKey;
-    uint64_t child_index;
-    IteratorCallback* merging_iter_cb;
-    ReadCallback* read_cb;
-    std::function<void(AsyncContext&)> seek_callback;
-    std::function<void(AsyncContext&)> next_callback;
-  } scan;
-
-  struct {
-    ColumnFamilyData *cfd;
-    SuperVersion* sv;
-    DBImpl* db_impl;
-    SequenceNumber max_covering_tombstone_seq;
-    struct {
-      std::unique_ptr<LookupKey> lkey;
-      Slice internal_key;
-      Slice user_key;
-    } key_info;
-    std::unique_ptr<PinnedIteratorsManager> pinned_iters_mgr;
-    std::unique_ptr<MergeContext> merge_context;
-    std::unique_ptr<GetContext> getCtx;
-    std::unique_ptr<FilePicker> fp;
-  } version;
-
-  struct {
-    Cache::Handle* handle;
-    TableCache* table_cache;
-  } cache;
-
-  struct {
-    bool key_may_match;
-    bool skip_filters;
-    bool skip_seek; // when build iterator, no need to do index seek
-    bool for_compaction;
-    bool read_contents_no_cache;
-    bool second_level; // used by PartitionedFilterBlockReader
-    uint64_t block_offset;
-    BlockType block_type;
-    FilePrefetchBuffer* prefetch_buffer;
-    BlockHandle* handle;
-    char* cache_key; // TODO when to delete
-    char* compressed_cache_key;
-    Slice key;
-    Slice ckey;
-    UncompressionDict* uncompression_dict;
-    std::unique_ptr<BlockCacheLookupContext> lookup_context;
-    std::unique_ptr<BlockFetcher> block_fetcher;
-    std::unique_ptr<BlockContents> raw_block_contents;
-    AsyncCallback* async_cb;
-    IteratorCallback* iter_cb;
-    bool iter_seek;
-    IteratorCallback* index_iter_cb;
-    bool index_iter_seek;
-    union {
-      std::unique_ptr<CachableEntry<Generic>> cache_entry;
-      std::unique_ptr<CachableEntry<BlockContents>> contents; // BlockBasedFilterBlockReader
-      std::unique_ptr<CachableEntry<Block>> block; // BinarySearchIndexReader & PartitionedFilterBlockReader
-      std::unique_ptr<CachableEntry<ParsedFullFilterBlock>> full_filter_block; // FullFilterBlockReader
-    } retrieve_block;
-    std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
-    std::unique_ptr<DataBlockIter> data_iter;
-  } reader;
-
+  uint64_t start_time;
+  ColumnFamilyHandle* cf;
   ReadOptions* options;
   Status status;
+  struct ReadContext read;
+  union {
+    struct {
+      Slice* key;
+      PinnableSlice* value;
+      std::function<void(AsyncContext&)> callback;
+      struct GetContextArgs args;
+    } get;
+    struct {
+      Slice* startKey;
+      std::function<void(AsyncContext&)> seek_callback;
+      std::function<void(AsyncContext&)> next_callback;
+      struct ScanContextArgs args;
+    } scan;
+  } op;
 };
 
 }  //  namespace rocksdb

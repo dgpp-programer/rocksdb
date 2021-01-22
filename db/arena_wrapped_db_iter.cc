@@ -52,7 +52,7 @@ void ArenaWrappedDBIter::Init(AsyncContext& context, const SequenceNumber& seque
     bool allow_blob, bool allow_refresh) {
   auto mem = arena_.AllocateAligned(sizeof(DBIter));
   db_iter_ = new (mem) DBIter(&context, nullptr, sequence, allow_blob, true);
-  sv_number_ = context.version.sv->version_number;
+  sv_number_ = context.read.sv->version_number;
   allow_refresh_ = allow_refresh;
 }
 
@@ -115,9 +115,9 @@ ArenaWrappedDBIter* NewArenaWrappedDbIterator(AsyncContext& context,
     const SequenceNumber& sequence, bool allow_blob, bool allow_refresh) {
   ArenaWrappedDBIter* iter = new ArenaWrappedDBIter();
   iter->Init(context, sequence, allow_blob, allow_refresh);
-  if (context.version.db_impl && context.version.cfd && allow_refresh) {
-    iter->StoreRefreshInfo(*context.options, context.version.db_impl,
-        context.version.cfd, context.scan.read_cb, allow_blob);
+  if (context.read.db_impl && context.read.cfd && allow_refresh) {
+    iter->StoreRefreshInfo(*context.options, context.read.db_impl,
+        context.read.cfd, context.op.scan.args.read_cb, allow_blob);
   }
   return iter;
 }

@@ -186,8 +186,8 @@ class DBIter final : public Iterator, public IteratorCallback {
 
   void Next() final override;
   void NextAsync(AsyncContext& context) final override;
-  void NextDone(AsyncContext& context) final override;
-  void SeekDone(AsyncContext& context) final override;
+  void NextDone(AsyncContext&) final override;
+  void SeekDone(AsyncContext&) final override;
   void Prev() final override;
   void Seek(const Slice& target) final override;
   void SeekAsync(AsyncContext& context) final override;

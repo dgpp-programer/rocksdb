@@ -541,8 +541,8 @@ class IndexBlockIter final : public BlockIter<IndexValue> {
 
   virtual void Seek(const Slice& target) override;
   /**
-    * method call this should specify context.version.key_info.internal_key
-    * and context.reader.index_iter_cb
+    * method call this should specify context.read.key_info.internal_key
+    * and context.read.index_iter_cb
     */
   virtual void SeekAsync(AsyncContext& context) override;
 
@@ -563,7 +563,7 @@ class IndexBlockIter final : public BlockIter<IndexValue> {
 
   virtual void NextAsync(AsyncContext& context) override {
     Next();
-    context.reader.index_iter_cb->NextDone(context);
+    context.read.index_iter_cb->NextDone(context);
   }
 
   virtual void SeekToFirst() override;

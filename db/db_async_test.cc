@@ -56,26 +56,27 @@ void TestWithOptions(Options& options) {
 
   struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(
       calloc(1, sizeof(struct AsyncContext)));
+
   PinnableSlice pinnable_val;
   if (!ctx) {
     return;
   }
   ReadOptions read_opts;
   ctx->options = &read_opts;
-  ctx->get.cf = db->DefaultColumnFamily();
-  ctx->get.value = &pinnable_val;
-  ctx->get.callback = [&](AsyncContext& ctx_) {
-    ASSERT_OK(ctx_.status);
-    size_t index = ctx->get.start_time;
-    ASSERT_TRUE(*ctx_.get.value == vals[index]);
-    ctx_.get.value->Reset();
+  ctx->cf = db->DefaultColumnFamily();
+  ctx->op.get.value = &pinnable_val;
+  ctx->op.get.callback = [&](AsyncContext&) {
+    ASSERT_OK(ctx->status);
+    size_t index = ctx->start_time;
+    ASSERT_TRUE(*ctx->op.get.value == vals[index]);
+    ctx->op.get.value->Reset();
   };
 
   // query memtable
   for (size_t i = 0; i < 3; ++i) {
     // test async read is OK
-    ctx->get.key = const_cast<Slice*>(&keys[i]);
-    ctx->get.start_time = i;
+    ctx->op.get.key = const_cast<Slice*>(&keys[i]);
+    ctx->start_time = i;
     db->GetAsync(*ctx);
     // test sync read is OK too
     std::string res;
@@ -89,8 +90,8 @@ void TestWithOptions(Options& options) {
   // query sstfile
   for (size_t i = 0; i < 3; ++i) {
     // test async read is OK
-    ctx->get.key = const_cast<Slice*>(&keys[i]);
-    ctx->get.start_time = i;
+    ctx->op.get.key = const_cast<Slice*>(&keys[i]);
+    ctx->start_time = i;
     db->GetAsync(*ctx);
     // test sync read is OK too
     std::string res;
@@ -102,17 +103,17 @@ void TestWithOptions(Options& options) {
   Iterator* iterator = db->NewAsyncIterator(*ctx);
   ASSERT_OK(ctx->status);
   size_t index = 0;
-  ctx->scan.startKey = const_cast<Slice*>(&keys[0]);
-  ctx->scan.next_callback = [&](AsyncContext& ctx_) {
-    ASSERT_OK(ctx_.status);
+  ctx->op.scan.startKey = const_cast<Slice*>(&keys[0]);
+  ctx->op.scan.next_callback = [&](AsyncContext&) {
+    ASSERT_OK(ctx->status);
     if (iterator->Valid()) {
       ASSERT_TRUE(keys[index] == iterator->key());
       ASSERT_TRUE(vals[index] == iterator->value());
       index++;
-      iterator->NextAsync(ctx_);
+      iterator->NextAsync(*ctx);
     }
   };
-  ctx->scan.seek_callback = ctx->scan.next_callback;
+  ctx->op.scan.seek_callback = ctx->op.scan.next_callback;
   iterator->SeekAsync(*ctx);
   ASSERT_TRUE(index == 3);
   delete iterator;

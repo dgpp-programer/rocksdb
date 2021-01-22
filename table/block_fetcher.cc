@@ -197,16 +197,16 @@ inline void BlockFetcher::GetBlockContents() {
 
 void BlockFetcher::ReadBlockContentsDone(AsyncContext& context) {
   if (block_type_ == BlockType::kFilter) {
-    if (context.reader.second_level
+    if (context.read.second_level
         || table_->get_rep()->filter_type == BlockBasedTable::Rep::FilterType::kFullFilter) {
       CachableEntry<ParsedFullFilterBlock> *block;
-      return context.reader.read_contents_no_cache
+      return context.read.read_contents_no_cache
           ? table_->ReadBlockContentsDone(context, block)
           : table_->ReadBlockContentsCallback(context, block);
     }
   }
   CachableEntry<Block> *block;
-  return context.reader.read_contents_no_cache
+  return context.read.read_contents_no_cache
       ? table_->ReadBlockContentsDone(context, block)
       : table_->ReadBlockContentsCallback(context, block);
 }
@@ -268,23 +268,23 @@ void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context,
     contents_->is_raw_block = true;
 #endif  // NDEBUG
     context.status = Status::OK();
-    return context.reader.read_contents_no_cache
+    return context.read.read_contents_no_cache
         ? table_->ReadBlockContentsDone(context, block_entry)
         : table_->ReadBlockContentsCallback(context, block_entry);
   }
   if (TryGetFromPrefetchBuffer()) {
     if (!context.status.ok()) {
-      return context.reader.read_contents_no_cache
+      return context.read.read_contents_no_cache
           ? table_->ReadBlockContentsDone(context, block_entry)
           : table_->ReadBlockContentsCallback(context, block_entry);
     }
   } else if (!TryGetCompressedBlockFromPersistentCache()) {
     PrepareBufferForBlockFromFile();
-    context.get.offset = handle_.offset();
-    context.get.length = block_size_ + kBlockTrailerSize;
-    context.get.result = &slice_;
-    context.get.scratch = used_buf_;
-    context.get.read_complete = &BlockFetcher::ReadBlockContentsCallback;
+    context.read.offset = handle_.offset();
+    context.read.length = block_size_ + kBlockTrailerSize;
+    context.read.result = &slice_;
+    context.read.scratch = used_buf_;
+    context.read.read_complete = &BlockFetcher::ReadBlockContentsCallback;
     return file_->ReadAsync(context);
   }
 
@@ -303,7 +303,7 @@ void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context,
   }
 
   InsertUncompressedBlockToPersistentCacheIfNeeded();
-  return context.reader.read_contents_no_cache
+  return context.read.read_contents_no_cache
       ? table_->ReadBlockContentsDone(context, block_entry)
       : table_->ReadBlockContentsCallback(context, block_entry);
 }

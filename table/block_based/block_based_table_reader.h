@@ -742,7 +742,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
           need_upper_bound_check_(need_upper_bound_check),
           prefix_extractor_(prefix_extractor),
           block_type_(block_type),
-          lookup_context_(context->reader.lookup_context->caller),
+          lookup_context_(context->read.lookup_context->caller),
           compaction_readahead_size_(compaction_readahead_size) {}
 
   virtual ~BlockBasedTableIterator() { delete index_iter_; }

@@ -1728,7 +1728,7 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
       version_number_(version_number) {}
 
 void Version::GetAsyncCallback(AsyncContext& context) {
-  auto get_context = context.version.getCtx.get();
+  auto get_context = context.read.getCtx.get();
   if (get_context->statistics_ != nullptr) {
     get_context->ReportCounters();
   }
@@ -1736,47 +1736,47 @@ void Version::GetAsyncCallback(AsyncContext& context) {
     if (!get_context->merge_operator_) {
       context.status = Status::InvalidArgument(
           "merge_operator is not properly initialized.");
-      context.version.db_impl->GetAsyncCallBack(context);
+      context.read.db_impl->GetAsyncCallBack(context);
       return;
     }
-    std::string* str_value = context.get.value != nullptr ? context.get.value->GetSelf() : nullptr;
+    std::string* str_value = context.op.get.value != nullptr ? context.op.get.value->GetSelf() : nullptr;
     context.status = MergeHelper::TimedFullMerge(get_context->merge_operator_,
-        context.version.key_info.user_key, nullptr, context.version.merge_context->GetOperands(),
+        context.read.key_info.user_key, nullptr, context.op.get.args.merge_context->GetOperands(),
         str_value, get_context->logger_, get_context->statistics_, get_context->env_,
         nullptr /* result_operand */, true);
-    if (LIKELY(context.get.value != nullptr)) {
-      context.get.value->PinSelf();
+    if (LIKELY(context.op.get.value != nullptr)) {
+      context.op.get.value->PinSelf();
     }
   } else {
     context.status = Status::NotFound("Version::GetAsyncCallback");
   }
-  context.version.db_impl->GetAsyncCallBack(context);
+  context.read.db_impl->GetAsyncCallBack(context);
 }
 
 void Version::IterateNextFile(AsyncContext& context) {
-  FdWithKeyRange* f = context.version.fp->GetNextFile();
-  if (f == nullptr || context.version.max_covering_tombstone_seq > 0) {
+  FdWithKeyRange* f = context.op.get.args.fp->GetNextFile();
+  if (f == nullptr || context.op.get.args.max_covering_tombstone_seq > 0) {
     GetAsyncCallback(context);
     return;
   }
-  if (context.version.getCtx->sample()) {
+  if (context.read.getCtx->sample()) {
     sample_file_read_inc(f->file_metadata);
   }
 
-  auto cur_version = context.version.sv->current;
-  auto cfd_tmp = context.version.cfd;
-  context.reader.skip_filters = IsFilterSkipped(static_cast<int>(
-      context.version.fp->GetHitFileLevel()), context.version.fp->IsHitFileLastInLevel());
-  cfd_tmp->table_cache()->GetAsync(context, *cur_version->internal_comparator(),
-      *f->file_metadata, cfd_tmp->internal_stats()->GetFileReadHist(context.version.fp->GetHitFileLevel()),
-      context.version.fp->GetCurrentLevel());
+  auto cur_version = context.read.sv->current;
+  context.read.skip_filters = IsFilterSkipped(static_cast<int>(
+      context.op.get.args.fp->GetHitFileLevel()), context.op.get.args.fp->IsHitFileLastInLevel());
+  context.read.cfd->table_cache()->GetAsync(context, *cur_version->internal_comparator(),
+      *f->file_metadata, context.read.cfd->internal_stats()->GetFileReadHist(
+          context.op.get.args.fp->GetHitFileLevel()),
+      context.op.get.args.fp->GetCurrentLevel());
 }
 
 void Version::GetAsyncDone(AsyncContext& ctx_) {
   if (!ctx_.status.ok()) {
-    return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+    return ctx_.read.db_impl->GetAsyncCallBack(ctx_);
   }
-  auto get_context = ctx_.version.getCtx.get();
+  auto get_context = ctx_.read.getCtx.get();
   if (get_context->State() != GetContext::kNotFound &&
       get_context->State() != GetContext::kMerge &&
       get_context->statistics_ != nullptr) {
@@ -1788,27 +1788,27 @@ void Version::GetAsyncDone(AsyncContext& ctx_) {
     case GetContext::kMerge:
       return IterateNextFile(ctx_);
     case GetContext::kFound:
-      if (ctx_.version.fp->GetHitFileLevel() == 0) {
+      if (ctx_.op.get.args.fp->GetHitFileLevel() == 0) {
         RecordTick(get_context->statistics_, GET_HIT_L0);
-      } else if (ctx_.version.fp->GetHitFileLevel() == 1) {
+      } else if (ctx_.op.get.args.fp->GetHitFileLevel() == 1) {
         RecordTick(get_context->statistics_, GET_HIT_L1);
-      } else if (ctx_.version.fp->GetHitFileLevel() >= 2) {
+      } else if (ctx_.op.get.args.fp->GetHitFileLevel() >= 2) {
         RecordTick(get_context->statistics_, GET_HIT_L2_AND_UP);
       }
-      PERF_COUNTER_BY_LEVEL_ADD(user_key_return_count, 1, ctx_.version.fp->GetHitFileLevel());
-      return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+      PERF_COUNTER_BY_LEVEL_ADD(user_key_return_count, 1, ctx_.op.get.args.fp->GetHitFileLevel());
+      return ctx_.read.db_impl->GetAsyncCallBack(ctx_);
     case GetContext::kDeleted:
       ctx_.status = Status::NotFound("Version::GetAsync");
-      return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+      return ctx_.read.db_impl->GetAsyncCallBack(ctx_);
     case GetContext::kCorrupt:
-      ctx_.status = Status::Corruption("corrupted key for ", ctx_.version.key_info.user_key);
-      return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+      ctx_.status = Status::Corruption("corrupted key for ", ctx_.read.key_info.user_key);
+      return ctx_.read.db_impl->GetAsyncCallBack(ctx_);
     case GetContext::kBlobIndex:
       ROCKS_LOG_ERROR(info_log_, "Encounter unexpected blob index.");
       ctx_.status = Status::NotSupported(
           "Encounter unexpected blob index. Please open DB with "
           "rocksdb::blob_db::BlobDB instead.");
-      return ctx_.version.db_impl->GetAsyncCallBack(ctx_);
+      return ctx_.read.db_impl->GetAsyncCallBack(ctx_);
     default :
       return IterateNextFile(ctx_);
   }
@@ -1817,20 +1817,20 @@ void Version::GetAsyncDone(AsyncContext& ctx_) {
 void Version::GetAsync(AsyncContext& context) {
   assert(context.status.ok() || context.status.IsMergeInProgress());
 
-  context.version.pinned_iters_mgr.reset(new PinnedIteratorsManager());
-  context.version.getCtx.reset(new GetContext(
+  context.op.get.args.pinned_iters_mgr.reset(new PinnedIteratorsManager());
+  context.read.getCtx.reset(new GetContext(
       user_comparator(), merge_operator_, info_log_, db_statistics_,
-      context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.version.key_info.user_key,
-      context.get.value, nullptr, context.version.merge_context.get(), true,
-      &context.version.max_covering_tombstone_seq, this->env_, nullptr,
-      merge_operator_ ? context.version.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
+      context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
+      context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
+      &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
+      merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
       BlockCacheTraceHelper::kReservedGetId));
 
   if (merge_operator_) {
-    context.version.pinned_iters_mgr->StartPinning();
+    context.op.get.args.pinned_iters_mgr->StartPinning();
   }
-  context.version.fp.reset(new FilePicker(
-      storage_info_.files_, context.version.key_info.user_key, context.version.key_info.internal_key,
+  context.op.get.args.fp.reset(new FilePicker(
+      storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
       &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
       user_comparator(), internal_comparator()));
 

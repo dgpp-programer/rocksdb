@@ -55,12 +55,12 @@ class InternalIteratorBase : public Cleanable {
   virtual void Seek(const Slice& target) = 0;
 
   /**
-   * method call this should specify context.version.key_info.internal_key
-   * and context.reader.iter_cb or context.reader.index_iter_cb
+   * method call this should specify context.read.key_info.internal_key
+   * and context.op.scan.args.iter_cb or context.read.index_iter_cb
    */
   virtual void SeekAsync(AsyncContext& context) {
-    Seek(context.version.key_info.internal_key);
-    context.reader.iter_cb->SeekDone(context);
+    Seek(context.read.key_info.internal_key);
+    context.op.scan.args.iter_cb->SeekDone(context);
   }
 
   // Position at the first key in the source that at or before target
@@ -74,7 +74,7 @@ class InternalIteratorBase : public Cleanable {
   virtual void Next() = 0;
   virtual void NextAsync(AsyncContext& context) {
     Next();
-    context.reader.iter_cb->NextDone(context);
+    context.op.scan.args.iter_cb->NextDone(context);
   }
 
   // Moves to the next entry in the source, and return result. Iterator

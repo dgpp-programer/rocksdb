@@ -62,6 +62,7 @@ class InternalIteratorBase : public Cleanable {
     Seek(context.read.key_info.internal_key);
     context.op.scan.args.iter_cb->SeekDone(context);
   }
+  virtual void SeekCallback(AsyncContext&) {}
 
   // Position at the first key in the source that at or before target
   // The iterator is Valid() after this call iff the source contains
@@ -76,6 +77,7 @@ class InternalIteratorBase : public Cleanable {
     Next();
     context.op.scan.args.iter_cb->NextDone(context);
   }
+  virtual void NextCallback(AsyncContext&) {}
 
   // Moves to the next entry in the source, and return result. Iterator
   // implementation should override this method to help methods inline better,

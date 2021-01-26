@@ -5612,6 +5612,183 @@ class Benchmark {
     }
   }
 
+  void SeekRandomTest(ThreadState* thread) {
+    int next_count = 0;
+    int complete = 0;
+    ReadOptions options(FLAGS_verify_checksum, true);
+    options.total_order_seek = FLAGS_total_order_seek;
+    options.prefix_same_as_start = FLAGS_prefix_same_as_start;
+    options.tailing = FLAGS_use_tailing_iterator;
+    options.readahead_size = FLAGS_readahead_size;
+
+    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(
+        calloc(1, sizeof(struct AsyncContext)));
+    ctx->options = &options;
+
+    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
+    ctx->cf = db_with_cfh->db->DefaultColumnFamily();
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    std::unique_ptr<const char[]> upper_bound_key_guard;
+    Slice upper_bound = AllocateKey(&upper_bound_key_guard);
+    std::unique_ptr<const char[]> lower_bound_key_guard;
+    Slice lower_bound = AllocateKey(&lower_bound_key_guard);
+    int64_t seek_pos = thread->rand.Next() % FLAGS_num;
+    GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, &key);
+
+    if (FLAGS_max_scan_distance != 0) {
+      if (FLAGS_reverse_iterator) {
+        GenerateKeyFromInt(static_cast<uint64_t>(
+            std::max(static_cast<int64_t>(0), seek_pos - FLAGS_max_scan_distance)),
+            FLAGS_num, &lower_bound);
+        options.iterate_lower_bound = &lower_bound;
+      } else {
+        auto min_num = std::min(FLAGS_num, seek_pos + FLAGS_max_scan_distance);
+        GenerateKeyFromInt(static_cast<uint64_t>(min_num), FLAGS_num, &upper_bound);
+        options.iterate_upper_bound = &upper_bound;
+      }
+    }
+
+    Iterator* iterator = db_with_cfh->db->NewAsyncIterator(*ctx);
+    assert(ctx->status.ok());
+    ctx->op.scan.startKey = const_cast<Slice*>(&key);
+    ctx->op.scan.seek_callback = [&](AsyncContext&) {
+      assert(ctx->status.ok());
+      if (iterator->Valid()) {
+        fprintf(stdout, "key is %s, target key is %s. \n",
+            iterator->key().ToString(true).c_str(), key.ToString(true).c_str());
+        iterator->NextAsync(*ctx);
+      } else {
+        complete++;
+        fprintf(stdout, "target key not find.\n");
+      }
+    };
+    ctx->op.scan.next_callback = [&](AsyncContext&) {
+      assert(ctx->status.ok());
+      if (next_count < FLAGS_seek_nexts && iterator->Valid()) {
+        next_count++;
+        fprintf(stdout, "key is %s, value is %s. \n",
+            iterator->key().ToString(true).c_str(), iterator->value().ToString(true).c_str());
+        iterator->NextAsync(*ctx);
+      } else {
+        complete++;
+        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, ctx->start_time);
+      }
+    };
+    ctx->start_time = FLAGS_env->NowMicros();
+    iterator->SeekAsync(*ctx);
+
+    struct spdk_poller *poller;
+    struct spdk_thread *spdk_thread = spdk_get_thread();
+    while (complete != 1) {
+      TAILQ_FOREACH(poller, &spdk_thread->active_pollers, tailq) {
+        poller->fn(poller->arg);
+      }
+    }
+
+    delete iterator;
+    free(ctx);
+  }
+
+  void SeekRandomAsync(ThreadState* thread) {
+    int64_t read = 0;
+    int64_t found = 0;
+    int64_t bytes = 0;
+    int64_t complete = 0;
+    int parallel = FLAGS_queue_depth;
+
+    // TODO chenxu14 make ReadOptions per AsyncContext
+    ReadOptions options(FLAGS_verify_checksum, true);
+    options.total_order_seek = FLAGS_total_order_seek;
+    options.prefix_same_as_start = FLAGS_prefix_same_as_start;
+    options.tailing = FLAGS_use_tailing_iterator;
+    options.readahead_size = FLAGS_readahead_size;
+
+    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+    Duration duration(FLAGS_duration, reads_);
+    char value_buffer[256];
+
+    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(parallel, sizeof(struct AsyncContext)));
+
+    for (int i = 0; i < parallel; i++) {
+      ctx[i].options = &options;
+      ctx[i].cf = db_with_cfh->db->DefaultColumnFamily();
+      ctx[i].op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(ctx[i]));
+      assert(ctx[i].op.scan.iterator->status().ok());
+    }
+
+    for (int i = 0; i < parallel; i++) {
+      int64_t seek_pos = thread->rand.Next() % FLAGS_num;
+      GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, &key);
+      ctx[i].op.scan.startKey = const_cast<Slice*>(&key);
+      ctx[i].op.scan.seek_callback = [&](AsyncContext& context) {
+        bool end = !context.op.scan.iterator->Valid();
+        if (!end) {
+          found++;
+          context.op.scan.next_counter = 0;
+        } else {
+          fprintf(stdout, "target key not find.\n");
+        }
+        return context.op.scan.next_callback(context);
+      };
+
+      ctx[i].op.scan.next_callback = [&](AsyncContext& context) {
+        context.op.scan.next_counter++;
+        bool end = !context.op.scan.iterator->Valid();
+        if (!end) {
+          Slice value = context.op.scan.iterator->value();
+          memcpy(value_buffer, value.data(), std::min(value.size(), sizeof(value_buffer)));
+          bytes += context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size();
+          if (context.op.scan.next_counter < FLAGS_seek_nexts) {
+            return context.op.scan.iterator->NextAsync(context);
+          } else {
+            end = true;
+          }
+        }
+        if (end) {
+          complete++;
+          thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, ctx->start_time);
+          if (!duration.Done(1)) {
+            // resubmit until time over
+            context.op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(context));
+            assert(context.op.scan.iterator->status().ok());
+            int64_t seek_pos_ = thread->rand.Next() % FLAGS_num;
+            GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos_), FLAGS_num, &key);
+            context.op.scan.startKey = const_cast<Slice*>(&key);
+            context.start_time = FLAGS_env->NowMicros();
+            read++;
+            context.op.scan.iterator->SeekAsync(context);
+          }
+        }
+      };
+
+      ctx[i].start_time = FLAGS_env->NowMicros();
+      read++;
+      ctx[i].op.scan.iterator->SeekAsync(ctx[i]);
+    }
+
+    struct spdk_poller *poller;
+    struct spdk_thread *spdk_thread = spdk_get_thread();
+    while (complete != read) {
+      TAILQ_FOREACH(poller, &spdk_thread->active_pollers, tailq) {
+        poller->fn(poller->arg);
+      }
+    }
+
+    char msg[100];
+    snprintf(msg, sizeof(msg), "(%" PRIu64 " of %" PRIu64 " found)\n", found, read);
+    thread->stats.AddBytes(bytes);
+    thread->stats.AddMessage(msg);
+    if (FLAGS_perf_level > rocksdb::PerfLevel::kDisable) {
+      thread->stats.AddMessage(std::string("PERF_CONTEXT:\n") + get_perf_context()->ToString());
+    }
+
+    free(ctx);
+  }
+
   void SeekRandom(ThreadState* thread) {
     int64_t read = 0;
     int64_t found = 0;
@@ -7072,6 +7249,12 @@ int db_bench_tool(int argc, char** argv) {
       method = &Benchmark::ReadRandomAsync;
     } else if (benchName == "readrandomtest") {
       method = &Benchmark::ReadRandomTest;
+    } else if (benchName == "seekrandomtest") {
+      method = &Benchmark::SeekRandomTest;
+    } else if (benchName == "seekrandomasync") {
+      method = &Benchmark::SeekRandomAsync;
+    } else if (benchName == "seekrandom") {
+      method = &Benchmark::SeekRandom;
     }
     std::function<void()> func = [&](){
       benchmark->RunBenchmark(method, &shared);

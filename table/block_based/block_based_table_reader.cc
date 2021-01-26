@@ -3300,8 +3300,8 @@ void BlockBasedTableIterator<TBlockIter, TValue>::Seek(const Slice& target) {
 }
 
 template <class TBlockIter, typename TValue>
-void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsync(AsyncContext&) {
-  target_ = &context_->read.key_info.internal_key;
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsync(AsyncContext& context) {
+  target_ = &context.read.key_info.internal_key;
   SeekAsyncImpl();
 }
 
@@ -3343,7 +3343,11 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncCallback() {
 }
 
 template <class TBlockIter, typename TValue>
-void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncDone() {
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekDone(AsyncContext&) {
+  if (!index_iter_->Valid()) {
+    ResetDataIter();
+    return IteratorDone();
+  }
   IndexValue v = index_iter_->value();
   const bool same_block = block_iter_points_to_real_block_
       && v.handle.offset() == prev_block_offset_;
@@ -3370,15 +3374,6 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncDone() {
 }
 
 template <class TBlockIter, typename TValue>
-void BlockBasedTableIterator<TBlockIter, TValue>::SeekDone(AsyncContext&) {
-  if (!index_iter_->Valid()) {
-    ResetDataIter();
-    return IteratorDone();
-  }
-  SeekAsyncDone();
-}
-
-template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::SeekIndexAsync() {
   context_->read.index_iter_cb = this;
   context_->read.index_iter_seek = true;
@@ -3389,7 +3384,7 @@ void BlockBasedTableIndexIterator::SeekIndexAsync() {
   // top_level index_block already in memory(through LazyInitIndexIterator)
   // so no need to do async read
   index_iter_->Seek(*target_);
-  return SeekAsyncDone();
+  return SeekDone(*context_);
 }
 
 template <class TBlockIter, typename TValue>
@@ -3416,14 +3411,10 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncImpl() {
     } else {
       index_iter_->SeekToFirst();
       // TODO chenxu14 async SeekToFirst
-      if (!index_iter_->Valid()) {
-        ResetDataIter();
-        return IteratorDone();
-      }
-      return SeekAsyncDone();
+      return SeekDone(*context_);
     }
   }
-  SeekAsyncDone();
+  SeekDone(*context_);
 }
 
 template <class TBlockIter, typename TValue>

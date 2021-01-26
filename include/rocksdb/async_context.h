@@ -21,9 +21,7 @@ class FilePicker;
 class MergeContext;
 class LookupKey;
 class PinnedIteratorsManager;
-class SliceTransform;
 class Block;
-class FilterBlockReader;
 class ParsedFullFilterBlock;
 class Generic;
 class FilePrefetchBuffer;
@@ -31,9 +29,8 @@ class BlockHandle;
 class BlockFetcher;
 class DataBlockIter;
 class DBImpl;
-class Version;
-class TableCache;
 class ReadCallback;
+class Iterator;
 
 template <class T> class CachableEntry;
 template <class TValue> class InternalIteratorBase;
@@ -139,7 +136,7 @@ struct AsyncContext {
   ReadOptions* options;
   Status status;
   struct ReadContext read;
-  union {
+  struct {
     struct {
       Slice* key;
       PinnableSlice* value;
@@ -147,9 +144,11 @@ struct AsyncContext {
       struct GetContextArgs args;
     } get;
     struct {
-      Slice* startKey;
+      Slice* startKey; // TODO chenxu14 change to Slice
+      std::unique_ptr<Iterator> iterator;
       std::function<void(AsyncContext&)> seek_callback;
       std::function<void(AsyncContext&)> next_callback;
+      int32_t next_counter;
       struct ScanContextArgs args;
     } scan;
   } op;

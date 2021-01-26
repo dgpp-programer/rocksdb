@@ -915,7 +915,6 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
   // If `target` is null, seek to first.
   void SeekImpl(const Slice* target);
   void SeekAsyncCallback();
-  void SeekAsyncDone();
   void SeekAsyncImpl();
   void InitDataBlock();
   void InitDataBlockAsync();

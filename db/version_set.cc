@@ -802,10 +802,14 @@ class LevelIterator final : public InternalIterator {
   ~LevelIterator() override { delete file_iter_.Set(nullptr); }
 
   void Seek(const Slice& target) override;
+  void SeekAsync(AsyncContext& context) override;
+  void SeekCallback(AsyncContext& context) override;
   void SeekForPrev(const Slice& target) override;
   void SeekToFirst() override;
   void SeekToLast() override;
   void Next() final override;
+  void NextAsync(AsyncContext& context) final override;
+  void NextCallback(AsyncContext& context) override;
   bool NextAndGetResult(IterateResult* result) override;
   void Prev() override;
 
@@ -939,6 +943,51 @@ class LevelIterator final : public InternalIterator {
   AsyncContext* context_;
 };
 
+void LevelIterator::SeekCallback(AsyncContext& context) {
+  // TODO chenxu14 async SkipEmptyFileForward
+  if (file_iter_.iter() != nullptr) {
+    file_iter_.Update();
+  }
+  if (SkipEmptyFileForward() && prefix_extractor_ != nullptr &&
+      file_iter_.iter() != nullptr && file_iter_.Valid()) {
+    Slice target_user_key = ExtractUserKey(context.read.key_info.internal_key);
+    Slice file_user_key = ExtractUserKey(file_iter_.key());
+    if (prefix_extractor_->InDomain(target_user_key) &&
+        (!prefix_extractor_->InDomain(file_user_key) ||
+            user_comparator_.Compare(
+                prefix_extractor_->Transform(target_user_key),
+                prefix_extractor_->Transform(file_user_key)) != 0)) {
+      SetFileIterator(nullptr);
+    }
+  }
+  CheckMayBeOutOfLowerBound();
+}
+
+void LevelIterator::SeekAsync(AsyncContext& context) {
+  bool need_to_reseek = true;
+  if (file_iter_.iter() != nullptr && file_index_ < flevel_->num_files) {
+    const FdWithKeyRange& cur_file = flevel_->files[file_index_];
+    if (icomparator_.InternalKeyComparator::Compare(context.read.key_info.internal_key,
+        cur_file.largest_key) <= 0 && icomparator_.InternalKeyComparator::Compare(
+            context.read.key_info.internal_key, cur_file.smallest_key) >= 0) {
+      need_to_reseek = false;
+      assert(static_cast<size_t>(FindFile(icomparator_, *flevel_,
+          context.read.key_info.internal_key)) == file_index_);
+    }
+  }
+  if (need_to_reseek) {
+    TEST_SYNC_POINT("LevelIterator::Seek:BeforeFindFile");
+    size_t new_file_index = FindFile(icomparator_, *flevel_,
+        context.read.key_info.internal_key);
+    InitFileIterator(new_file_index);
+  }
+  if (file_iter_.iter() != nullptr) {
+    return file_iter_.SeekAsync(context);
+    // file_iter_.Seek(context.read.key_info.internal_key);
+  }
+  context.op.scan.args.iter_cb->SeekDone(context);
+}
+
 void LevelIterator::Seek(const Slice& target) {
   // Check whether the seek key fall under the same file
   bool need_to_reseek = true;
@@ -1021,6 +1070,16 @@ void LevelIterator::SeekToLast() {
   }
   SkipEmptyFileBackward();
   CheckMayBeOutOfLowerBound();
+}
+
+void LevelIterator::NextCallback(AsyncContext&) {
+  file_iter_.Update();
+  SkipEmptyFileForward(); // TODO chenxu14 make this async
+}
+
+void LevelIterator::NextAsync(AsyncContext& context) {
+  assert(Valid());
+  file_iter_.NextAsync(context);
 }
 
 void LevelIterator::Next() { NextImpl(); }

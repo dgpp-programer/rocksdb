@@ -110,6 +110,7 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
 
   void SeekDone(AsyncContext& context) override {
     auto child = &children_[context.op.scan.args.child_index];
+    child->SeekCallback(context);
     child->Update();
     PERF_COUNTER_ADD(seek_child_seek_count, 1);
     {
@@ -230,6 +231,7 @@ class MergingIterator : public InternalIterator, public IteratorCallback {
   }
 
   void NextDone(AsyncContext& context) override {
+    current_->NextCallback(context);
     current_->Update();
     if (current_->Valid()) {
       assert(current_->status().ok());

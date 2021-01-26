@@ -79,6 +79,11 @@ class IteratorWrapperBase {
     iter_->NextAsync(context);
   }
 
+  void NextCallback(AsyncContext& context) {
+    assert(iter_);
+    iter_->NextCallback(context);
+  }
+
   void Prev()               { assert(iter_); iter_->Prev();        Update(); }
   void Seek(const Slice& k) {
     assert(iter_);
@@ -93,6 +98,11 @@ class IteratorWrapperBase {
   void SeekAsync(AsyncContext& context) {
     assert(iter_);
     iter_->SeekAsync(context);
+  }
+
+  void SeekCallback(AsyncContext& context) {
+    assert(iter_);
+    iter_->SeekCallback(context);
   }
 
   void SeekForPrev(const Slice& k) {

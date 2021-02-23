@@ -8,7 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "file/file_prefetch_buffer.h"
-
+#include "table/block_fetcher.h"
 #include <algorithm>
 #include <mutex>
 
@@ -21,6 +21,61 @@
 #include "util/rate_limiter.h"
 
 namespace rocksdb {
+
+void FilePrefetchBuffer::PrefetchAsync(RandomAccessFileReader* reader, AsyncContext& context) {
+  if (!enable_ || reader == nullptr) {
+    context.status = Status::OK();
+    return PrefetchCallback(context);
+  }
+  size_t alignment = reader->file()->GetRequiredBufferAlignment();
+  size_t offset_ = static_cast<size_t>(context.read.offset);
+  uint64_t rounddown_offset = Rounddown(offset_, alignment);
+  uint64_t roundup_end = Roundup(offset_ + context.read.length, alignment);
+  uint64_t roundup_len = roundup_end - rounddown_offset;
+  assert(roundup_len >= alignment);
+  assert(roundup_len % alignment == 0);
+
+  uint64_t chunk_offset_in_buffer = 0;
+  uint64_t chunk_len = 0;
+  bool copy_data_to_new_buffer = false;
+  if (buffer_.CurrentSize() > 0 && context.read.offset >= buffer_offset_ &&
+      context.read.offset <= buffer_offset_ + buffer_.CurrentSize()) {
+    if (context.read.offset + context.read.length <= buffer_offset_ + buffer_.CurrentSize()) {
+      context.status = Status::OK();
+      return PrefetchCallback(context);
+    } else {
+      chunk_offset_in_buffer =
+          Rounddown(static_cast<size_t>(context.read.offset - buffer_offset_), alignment);
+      chunk_len = buffer_.CurrentSize() - chunk_offset_in_buffer;
+      assert(chunk_offset_in_buffer % alignment == 0);
+      assert(chunk_len % alignment == 0);
+      assert(chunk_offset_in_buffer + chunk_len <=
+          buffer_offset_ + buffer_.CurrentSize());
+      if (chunk_len > 0) {
+        copy_data_to_new_buffer = true;
+      } else {
+        chunk_offset_in_buffer = 0;
+      }
+    }
+  }
+
+  if (buffer_.Capacity() < roundup_len) {
+    buffer_.Alignment(alignment);
+    buffer_.AllocateNewBuffer(static_cast<size_t>(roundup_len),
+        copy_data_to_new_buffer, chunk_offset_in_buffer, static_cast<size_t>(chunk_len));
+  } else if (chunk_len > 0) {
+    buffer_.RefitTail(static_cast<size_t>(chunk_offset_in_buffer),
+        static_cast<size_t>(chunk_len));
+  }
+
+  context.read.offset = rounddown_offset + chunk_len;
+  context.read.length = roundup_len - chunk_len;
+  context.read.scratch = buffer_.BufferStart() + chunk_len;
+  context.read.chunk_len = chunk_len;
+  context.read.read_complete = &BlockFetcher::PrefetchDone;
+  return reader->ReadAsync(context);
+}
+
 Status FilePrefetchBuffer::Prefetch(RandomAccessFileReader* reader,
                                     uint64_t offset, size_t n,
                                     bool for_compaction) {
@@ -94,6 +149,49 @@ Status FilePrefetchBuffer::Prefetch(RandomAccessFileReader* reader,
     buffer_.Size(static_cast<size_t>(chunk_len) + result.size());
   }
   return s;
+}
+
+void FilePrefetchBuffer::PrefetchCallback(AsyncContext& context) {
+  if (!context.status.ok()) {
+    context.read.prefetch_buf_hit = false;
+    return context.read.block_fetcher->ReadFromCacheCallback(context);
+  }
+  readahead_size_ = std::min(max_readahead_size_, readahead_size_ * 2);
+  ReadFromCacheDone(context);
+}
+
+inline void FilePrefetchBuffer::ReadFromCacheDone(AsyncContext& context) {
+  *context.read.result = Slice(
+      buffer_.BufferStart() + context.read.handle->offset() - buffer_offset_,
+      context.read.handle->size() + kBlockTrailerSize);
+  context.read.prefetch_buf_hit = true;
+  return context.read.block_fetcher->ReadFromCacheCallback(context);
+}
+
+void FilePrefetchBuffer::TryReadFromCacheAsync(AsyncContext& context) {
+  if (track_min_offset_ && context.read.offset < min_offset_read_) {
+    min_offset_read_ = static_cast<size_t>(context.read.offset);
+  }
+  if (!enable_ || context.read.offset < buffer_offset_) {
+    context.read.prefetch_buf_hit = false;
+    return context.read.block_fetcher->ReadFromCacheCallback(context);
+  }
+  if (context.read.offset + context.read.length > buffer_offset_ + buffer_.CurrentSize()) {
+    if (readahead_size_ > 0) {
+      assert(file_reader_ != nullptr);
+      assert(max_readahead_size_ >= readahead_size_);
+      if (context.read.for_compaction) {
+        context.read.length = std::max(context.read.length, readahead_size_);
+      } else {
+        context.read.length = context.read.length + readahead_size_;
+      }
+      return PrefetchAsync(file_reader_, context);
+    } else {
+      context.read.prefetch_buf_hit = false;
+      return context.read.block_fetcher->ReadFromCacheCallback(context);
+    }
+  }
+  ReadFromCacheDone(context);
 }
 
 bool FilePrefetchBuffer::TryReadFromCache(uint64_t offset, size_t n,

@@ -21,6 +21,9 @@ namespace rocksdb {
 // FilePrefetchBuffer is a smart buffer to store and read data from a file.
 class FilePrefetchBuffer {
  public:
+  uint64_t buffer_offset_;
+  AlignedBuffer buffer_;
+
   // Constructor.
   //
   // All arguments are optional.
@@ -62,6 +65,8 @@ class FilePrefetchBuffer {
   Status Prefetch(RandomAccessFileReader* reader, uint64_t offset, size_t n,
                   bool for_compaction = false);
 
+  void PrefetchAsync(RandomAccessFileReader* reader, AsyncContext& context);
+
   // Tries returning the data for a file raed from this buffer, if that data is
   // in the buffer.
   // It handles tracking the minimum read offset if track_min_offset = true.
@@ -75,13 +80,15 @@ class FilePrefetchBuffer {
   bool TryReadFromCache(uint64_t offset, size_t n, Slice* result,
                         bool for_compaction = false);
 
+  void TryReadFromCacheAsync(AsyncContext& context);
+
+  void PrefetchCallback(AsyncContext& context);
+
   // The minimum `offset` ever passed to TryReadFromCache(). This will nly be
   // tracked if track_min_offset = true.
   size_t min_offset_read() const { return min_offset_read_; }
 
  private:
-  AlignedBuffer buffer_;
-  uint64_t buffer_offset_;
   RandomAccessFileReader* file_reader_;
   size_t readahead_size_;
   size_t max_readahead_size_;
@@ -93,5 +100,7 @@ class FilePrefetchBuffer {
   // If true, track minimum `offset` ever passed to TryReadFromCache(), which
   // can be fetched from min_offset_read().
   bool track_min_offset_;
+
+  void ReadFromCacheDone(AsyncContext& context);
 };
 }  // namespace rocksdb

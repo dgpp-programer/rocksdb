@@ -329,9 +329,7 @@ class BlockBasedTable : public TableReader, public AsyncCallback {
   void MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
       CachableEntry<TBlocklike>* block_entry, BlockContents* contents) const;
 
-  template <typename TBlocklike>
-  void MaybeReadBlockAndLoadToCacheCallback(AsyncContext &context,
-      CachableEntry<TBlocklike>* block_entry) const;
+  void MaybeReadBlockAndLoadToCacheCallback(AsyncContext &context) const;
 
   template <typename TBlocklike>
   void ReadBlockContentsCallback(AsyncContext &context, CachableEntry<TBlocklike>* block_entry) const;
@@ -352,9 +350,7 @@ class BlockBasedTable : public TableReader, public AsyncCallback {
   void ReadBlockContentsDone(AsyncContext &context,
       CachableEntry<TBlocklike>* entry) const;
 
-  template <typename TBlocklike>
-  void RetrieveBlockCallback(AsyncContext &context,
-      CachableEntry<TBlocklike>* block_entry) const;
+  void RetrieveBlockCallback(AsyncContext &context) const;
 
   void RetrieveMultipleBlocks(
       const ReadOptions& options, const MultiGetRange* batch,

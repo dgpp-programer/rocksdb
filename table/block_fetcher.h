@@ -68,11 +68,13 @@ class BlockFetcher {
 
   Status ReadBlockContents();
 
-  template <typename TBlocklike>
-  void ReadBlockContentsAsync(AsyncContext& context,
-      CachableEntry<TBlocklike>* block_entry);
+  void ReadBlockContentsAsync(AsyncContext& context);
+
+  void ReadFromCacheCallback(AsyncContext& context);
 
   void ReadBlockContentsCallback(AsyncContext& context);
+
+  void PrefetchDone(AsyncContext& context);
 
   CompressionType get_compression_type() const { return compression_type_; }
 
@@ -109,6 +111,11 @@ class BlockFetcher {
   bool TryGetUncompressBlockFromPersistentCache();
   // return true if found
   bool TryGetFromPrefetchBuffer();
+
+  void TryGetFromPrefetchBufferAsync(AsyncContext& context);
+
+  void GetFromPrefetchBufferCallback(AsyncContext& context);
+
   bool TryGetCompressedBlockFromPersistentCache();
   void PrepareBufferForBlockFromFile();
   // Copy content from used_buf_ to new heap buffer.

@@ -81,12 +81,16 @@ struct ReadContext {
   uint64_t block_offset;
   BlockType block_type;
   FilePrefetchBuffer* prefetch_buffer;
+  bool prefetch_buf_hit;
+  uint64_t chunk_len;
   BlockHandle* handle;
   char* cache_key; // TODO when to delete
   char* compressed_cache_key;
   Slice key;
   Slice ckey;
   UncompressionDict* uncompression_dict;
+  // TODO chenxu14 consider add reset method with pointer Entry
+  // or use SPDK's memory pool
   std::unique_ptr<BlockCacheLookupContext> lookup_context;
   std::unique_ptr<BlockFetcher> block_fetcher;
   std::unique_ptr<BlockContents> raw_block_contents;

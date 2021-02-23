@@ -2857,9 +2857,7 @@ template void BlockBasedTable::ReadBlockContentsDone<UncompressionDict>(
 template void BlockBasedTable::ReadBlockContentsDone<BlockContents>(
     AsyncContext &context, CachableEntry<BlockContents>* block_entry) const;
 
-template <typename TBlocklike>
-void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context,
-    CachableEntry<TBlocklike>* entry) const {
+void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context) const {
   const bool no_io = context.options->read_tier == kBlockCacheTier;
   if (no_io) {
     context.status = Status::Incomplete("no blocking io");
@@ -2872,6 +2870,7 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context,
   const bool do_uncompress = maybe_compressed;
 
   context.read.raw_block_contents.reset(new BlockContents());
+  // TODO chenxu14 move BlockFetcher to TableReader? race condition?
   context.read.block_fetcher.reset(new BlockFetcher(
       rep_->file.get(), context.read.prefetch_buffer, rep_->footer, *context.options,
       *context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions,
@@ -2880,22 +2879,19 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context,
       context.read.for_compaction, this));
 
   context.read.read_contents_no_cache = true;
-  context.read.block_fetcher->ReadBlockContentsAsync(context, entry);
+  context.read.block_fetcher->ReadBlockContentsAsync(context);
 }
 
-template <typename TBlocklike>
-void BlockBasedTable::MaybeReadBlockAndLoadToCacheCallback(AsyncContext &context,
-    CachableEntry<TBlocklike>*) const {
+void BlockBasedTable::MaybeReadBlockAndLoadToCacheCallback(
+    AsyncContext &context) const {
   if (!context.status.ok()) {
     return context.read.async_cb->RetrieveBlockDone(context);
   }
-  auto block_entry = reinterpret_cast<CachableEntry<TBlocklike>*>(
-    context.read.retrieve_block.cache_entry.get());
-  if (block_entry->GetValue() != nullptr) {
+  if (context.read.retrieve_block.cache_entry->GetValue() != nullptr) {
     assert(context.status.ok());
     return context.read.async_cb->RetrieveBlockDone(context);
   }
-  RetrieveBlockCallback(context, block_entry);
+  RetrieveBlockCallback(context);
 }
 
 template <typename TBlocklike>
@@ -2913,7 +2909,7 @@ void BlockBasedTable::ReadBlockContentsCallback(AsyncContext &context,
         GetMemoryAllocator(rep_->table_options), context.read.block_type,
         context.read.getCtx.get());
   }
-  MaybeReadBlockAndLoadToCacheCallback(context, block_entry);
+  MaybeReadBlockAndLoadToCacheCallback(context);
 }
 template void BlockBasedTable::ReadBlockContentsCallback<Block>(
     AsyncContext &context, CachableEntry<Block>*) const;
@@ -2972,7 +2968,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
             rep_->persistent_cache_options, GetMemoryAllocator(rep_->table_options),
             GetMemoryAllocatorForCompressedBlock(rep_->table_options), false, this));
         context.read.read_contents_no_cache = false;
-        return context.read.block_fetcher->ReadBlockContentsAsync(context, block_entry);
+        return context.read.block_fetcher->ReadBlockContentsAsync(context);
       } else {
         if (context.status.ok()) {
           context.status = PutDataBlockToCache(context.read.key, context.read.ckey,
@@ -2984,7 +2980,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
       }
     }
   }
-  MaybeReadBlockAndLoadToCacheCallback(context, block_entry);
+  MaybeReadBlockAndLoadToCacheCallback(context);
 }
 
 template <typename TBlocklike>
@@ -2995,7 +2991,7 @@ void BlockBasedTable::RetrieveBlockAsync(AsyncContext &context,
   if (use_cache) {
     MaybeReadBlockAndLoadToCacheAsync(context, block_entry, nullptr);
   } else {
-    RetrieveBlockCallback(context, block_entry);
+    RetrieveBlockCallback(context);
   }
 }
 

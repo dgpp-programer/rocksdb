@@ -88,6 +88,31 @@ inline bool BlockFetcher::TryGetUncompressBlockFromPersistentCache() {
   return false;
 }
 
+void BlockFetcher::ReadFromCacheCallback(AsyncContext& context) {
+  if (context.read.prefetch_buf_hit) {
+    got_from_prefetch_buffer_ = true;
+    block_size_ = static_cast<size_t>(handle_.size());
+    CheckBlockChecksum();
+    context.status = status_;
+    if (status_.ok()) {
+      used_buf_ = const_cast<char*>(slice_.data());
+    }
+  }
+  GetFromPrefetchBufferCallback(context);
+}
+
+inline void BlockFetcher::TryGetFromPrefetchBufferAsync(AsyncContext& context) {
+  if (prefetch_buffer_ != nullptr) {
+    context.read.handle = const_cast<BlockHandle*>(&handle_);
+    context.read.offset = handle_.offset();
+    context.read.length = handle_.size() + kBlockTrailerSize;
+    context.read.result = &slice_;
+    context.read.for_compaction = for_compaction_;
+    return prefetch_buffer_->TryReadFromCacheAsync(context);
+  }
+  GetFromPrefetchBufferCallback(context);
+}
+
 inline bool BlockFetcher::TryGetFromPrefetchBuffer() {
   if (prefetch_buffer_ != nullptr &&
       prefetch_buffer_->TryReadFromCache(
@@ -211,6 +236,15 @@ void BlockFetcher::ReadBlockContentsDone(AsyncContext& context) {
       : table_->ReadBlockContentsCallback(context, block);
 }
 
+void BlockFetcher::PrefetchDone(AsyncContext& context) {
+  if (context.status.ok()) {
+    prefetch_buffer_->buffer_offset_ = context.read.offset - context.read.chunk_len;
+    prefetch_buffer_->buffer_.Size(static_cast<size_t>(context.read.chunk_len)
+        + context.read.result->size());
+  }
+  prefetch_buffer_->PrefetchCallback(context);
+}
+
 void BlockFetcher::ReadBlockContentsCallback(AsyncContext& context) {
   PERF_COUNTER_ADD(block_read_count, 1);
   switch (block_type_) {
@@ -258,25 +292,10 @@ void BlockFetcher::ReadBlockContentsCallback(AsyncContext& context) {
   return ReadBlockContentsDone(context);
 }
 
-template <typename TBlocklike>
-void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context,
-    CachableEntry<TBlocklike>* block_entry) {
-  block_size_ = static_cast<size_t>(handle_.size());
-  if (TryGetUncompressBlockFromPersistentCache()) {
-    compression_type_ = kNoCompression;
-#ifndef NDEBUG
-    contents_->is_raw_block = true;
-#endif  // NDEBUG
-    context.status = Status::OK();
-    return context.read.read_contents_no_cache
-        ? table_->ReadBlockContentsDone(context, block_entry)
-        : table_->ReadBlockContentsCallback(context, block_entry);
-  }
-  if (TryGetFromPrefetchBuffer()) {
+void BlockFetcher::GetFromPrefetchBufferCallback(AsyncContext& context) {
+  if (got_from_prefetch_buffer_) {
     if (!context.status.ok()) {
-      return context.read.read_contents_no_cache
-          ? table_->ReadBlockContentsDone(context, block_entry)
-          : table_->ReadBlockContentsCallback(context, block_entry);
+      return ReadBlockContentsDone(context);
     }
   } else if (!TryGetCompressedBlockFromPersistentCache()) {
     PrepareBufferForBlockFromFile();
@@ -303,22 +322,21 @@ void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context,
   }
 
   InsertUncompressedBlockToPersistentCacheIfNeeded();
-  return context.read.read_contents_no_cache
-      ? table_->ReadBlockContentsDone(context, block_entry)
-      : table_->ReadBlockContentsCallback(context, block_entry);
+  return ReadBlockContentsDone(context);
 }
 
-template void BlockFetcher::ReadBlockContentsAsync<Block>(
-    AsyncContext &context, CachableEntry<Block>* block_entry);
-
-template void BlockFetcher::ReadBlockContentsAsync<ParsedFullFilterBlock>(
-    AsyncContext &context, CachableEntry<ParsedFullFilterBlock>* block_entry);
-
-template void BlockFetcher::ReadBlockContentsAsync<UncompressionDict>(
-    AsyncContext &context, CachableEntry<UncompressionDict>* block_entry);
-
-template void BlockFetcher::ReadBlockContentsAsync<BlockContents>(
-    AsyncContext &context, CachableEntry<BlockContents>* block_entry);
+void BlockFetcher::ReadBlockContentsAsync(AsyncContext& context) {
+  block_size_ = static_cast<size_t>(handle_.size());
+  if (TryGetUncompressBlockFromPersistentCache()) {
+    compression_type_ = kNoCompression;
+#ifndef NDEBUG
+    contents_->is_raw_block = true;
+#endif  // NDEBUG
+    context.status = Status::OK();
+    return ReadBlockContentsDone(context);
+  }
+  return TryGetFromPrefetchBufferAsync(context);
+}
 
 Status BlockFetcher::ReadBlockContents() {
   block_size_ = static_cast<size_t>(handle_.size());

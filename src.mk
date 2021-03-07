@@ -89,6 +89,7 @@ LIB_SOURCES =                                                   \
   memory/arena.cc                                               \
   memory/concurrent_arena.cc                                    \
   memory/jemalloc_nodump_allocator.cc                           \
+  memory/spdk_memory_allocator.cc                               \
   memtable/alloc_tracker.cc                                     \
   memtable/hash_linklist_rep.cc                                 \
   memtable/hash_skiplist_rep.cc                                 \

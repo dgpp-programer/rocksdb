@@ -2969,7 +2969,7 @@ class CustomMemoryAllocator : public MemoryAllocator {
     memcpy(ptr, "memory_allocator_", 16);  // mangle first 16 bytes
     return reinterpret_cast<void*>(ptr + 16);
   }
-  void Deallocate(void* p) override {
+  void Deallocate(void* p, size_t size __attribute__((__unused__))) override {
     ++numDeallocations;
     char* ptr = reinterpret_cast<char*>(p) - 16;
     delete[] ptr;

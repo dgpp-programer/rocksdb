@@ -290,7 +290,7 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     context.read.async_cb = this;
     context.read.block_type = BlockType::kIndex;
     context.read.prefetch_buffer = nullptr;
-    context.read.handle = const_cast<BlockHandle*>(&rep->footer.index_handle());
+    context.read.handle = rep->footer.index_handle();
     context.read.uncompression_dict = const_cast<UncompressionDict*>(
         &UncompressionDict::GetEmptyDict());
     context.read.for_compaction = false;
@@ -448,7 +448,7 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     }
 
     context.read.retrieve_block.block.reset(new CachableEntry<Block>());
-    context.read.handle = &v.handle;
+    context.read.handle = v.handle;
     context.read.block_type = BlockType::kData;
     context.read.prefetch_buffer = nullptr;
     context.read.for_compaction = false;
@@ -2873,9 +2873,9 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context) const {
   // TODO chenxu14 move BlockFetcher to TableReader? race condition?
   context.read.block_fetcher.reset(new BlockFetcher(
       rep_->file.get(), context.read.prefetch_buffer, rep_->footer, *context.options,
-      *context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions,
+      context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions,
       do_uncompress, maybe_compressed, context.read.block_type, *context.read.uncompression_dict,
-      rep_->persistent_cache_options, GetMemoryAllocator(rep_->table_options), nullptr,
+      rep_->persistent_cache_options, rep_->table_options.memory_allocator.get(), nullptr,
       context.read.for_compaction, this));
 
   context.read.read_contents_no_cache = true;
@@ -2939,11 +2939,11 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
     // create key for block cache
     if (block_cache != nullptr) {
       context.read.key = GetCacheKey(rep_->cache_key_prefix, rep_->cache_key_prefix_size,
-          *context.read.handle, context.read.cache_key);
+          context.read.handle, context.read.cache_key);
     }
     if (block_cache_compressed != nullptr) {
       context.read.ckey = GetCacheKey(rep_->compressed_cache_key_prefix,
-          rep_->compressed_cache_key_prefix_size, *context.read.handle,
+          rep_->compressed_cache_key_prefix_size, context.read.handle,
           context.read.compressed_cache_key);
     }
     if (!contents) {
@@ -2963,7 +2963,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
       if (!contents) {
         context.read.block_fetcher.reset(new BlockFetcher(
             rep_->file.get(), context.read.prefetch_buffer, rep_->footer, *context.options,
-            *context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions, do_uncompress,
+            context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions, do_uncompress,
             maybe_compressed, context.read.block_type, *context.read.uncompression_dict,
             rep_->persistent_cache_options, GetMemoryAllocator(rep_->table_options),
             GetMemoryAllocatorForCompressedBlock(rep_->table_options), false, this));
@@ -3149,7 +3149,7 @@ void IndexBlockLazyInitIter::InitInnerIter(AsyncContext& context) {
     context.read.async_cb = this;
     context.read.block_type = BlockType::kIndex;
     context.read.prefetch_buffer = nullptr;
-    context.read.handle = const_cast<BlockHandle*>(&rep->footer.index_handle());
+    context.read.handle = rep->footer.index_handle();
     context.read.uncompression_dict = const_cast<UncompressionDict*>(
         &UncompressionDict::GetEmptyDict());
     context.read.for_compaction = false;
@@ -3732,7 +3732,7 @@ void BlockBasedTableIterator<TBlockIter, TValue>::InitDataBlockAsync() {
     }
 
     context_->read.retrieve_block.block.reset(new CachableEntry<Block>());
-    context_->read.handle = &data_block_handle;
+    context_->read.handle = data_block_handle;
     context_->read.block_type = block_type_;
     context_->read.prefetch_buffer = prefetch_buffer_.get();
     context_->read.for_compaction = (context_->read.lookup_context->caller == TableReaderCaller::kCompaction);

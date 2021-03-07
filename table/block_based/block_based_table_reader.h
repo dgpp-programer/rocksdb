@@ -687,9 +687,10 @@ struct BlockBasedTable::Rep {
   void CreateFilePrefetchBuffer(
       size_t readahead_size, size_t max_readahead_size,
       std::unique_ptr<FilePrefetchBuffer>* fpb) const {
-    fpb->reset(new FilePrefetchBuffer(file.get(), readahead_size,
-                                      max_readahead_size,
-                                      !ioptions.allow_mmap_reads /* enable */));
+    fpb->reset(new FilePrefetchBuffer(file.get(), readahead_size, max_readahead_size,
+        !ioptions.allow_mmap_reads /* enable */,
+        false /* track_min_offset */,
+        table_options.memory_allocator.get()));
   }
 };
 

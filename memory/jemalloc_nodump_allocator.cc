@@ -56,7 +56,8 @@ void* JemallocNodumpAllocator::Allocate(size_t size) {
   return mallocx(size, MALLOCX_ARENA(arena_index_) | tcache_flag);
 }
 
-void JemallocNodumpAllocator::Deallocate(void* p) {
+void JemallocNodumpAllocator::Deallocate(void* p,
+    size_t size __attribute__((__unused__))) {
   // Obtain tcache.
   size_t size = 0;
   if (options_.limit_tcache_size) {

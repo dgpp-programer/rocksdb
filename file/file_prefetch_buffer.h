@@ -48,14 +48,16 @@ class FilePrefetchBuffer {
   // `Prefetch` to load data into the buffer.
   FilePrefetchBuffer(RandomAccessFileReader* file_reader = nullptr,
                      size_t readadhead_size = 0, size_t max_readahead_size = 0,
-                     bool enable = true, bool track_min_offset = false)
+                     bool enable = true, bool track_min_offset = false,
+                     MemoryAllocator* allocator = nullptr)
       : buffer_offset_(0),
         file_reader_(file_reader),
         readahead_size_(readadhead_size),
         max_readahead_size_(max_readahead_size),
         min_offset_read_(port::kMaxSizet),
         enable_(enable),
-        track_min_offset_(track_min_offset) {}
+        track_min_offset_(track_min_offset),
+        allocator_(allocator){}
 
   // Load data into the buffer from a file.
   // reader : the file reader.
@@ -100,6 +102,7 @@ class FilePrefetchBuffer {
   // If true, track minimum `offset` ever passed to TryReadFromCache(), which
   // can be fetched from min_offset_read().
   bool track_min_offset_;
+  MemoryAllocator* allocator_;
 
   void ReadFromCacheDone(AsyncContext& context);
 };

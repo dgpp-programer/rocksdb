@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include "port/port.h"
+#include "memory/memory_allocator.h"
 
 namespace rocksdb {
 
@@ -56,7 +57,7 @@ inline size_t Rounddown(size_t x, size_t y) { return (x / y) * y; }
 //                         copy_offset, copy_len);
 class AlignedBuffer {
   size_t alignment_;
-  std::unique_ptr<char[]> buf_;
+  CacheAllocationPtr buf_;
   size_t capacity_;
   size_t cursize_;
   char* bufstart_;
@@ -138,7 +139,8 @@ public:
   // the current buffer capacity and copy_data is true i.e. the old buffer is
   // retained as is.
   void AllocateNewBuffer(size_t requested_capacity, bool copy_data = false,
-                         uint64_t copy_offset = 0, size_t copy_len = 0) {
+                         uint64_t copy_offset = 0, size_t copy_len = 0,
+                         MemoryAllocator* allocator = nullptr) {
     assert(alignment_ > 0);
     assert((alignment_ & (alignment_ - 1)) == 0);
 
@@ -149,11 +151,25 @@ public:
       return;
     }
 
-    size_t new_capacity = Roundup(requested_capacity, alignment_);
-    char* new_buf = new char[new_capacity + alignment_];
-    char* new_bufstart = reinterpret_cast<char*>(
-        (reinterpret_cast<uintptr_t>(new_buf) + (alignment_ - 1)) &
-        ~static_cast<uintptr_t>(alignment_ - 1));
+    size_t new_capacity = requested_capacity;
+    char* new_buf;
+    char* new_bufstart;
+    if (allocator) {
+      if (requested_capacity < allocator->ElementSize()) {
+        // In case allocator only allocate same size elements
+        new_capacity =  allocator->ElementSize();
+      }
+      new_buf = reinterpret_cast<char*>(allocator->Allocate(new_capacity));
+      // allocator will do alignment themselves
+      new_bufstart = new_buf;
+    } else {
+      new_capacity = Roundup(requested_capacity, alignment_);
+      new_buf = new char[new_capacity + alignment_];
+      // new_buf maybe not alignment, so we do the following
+      new_bufstart = reinterpret_cast<char*>(
+          (reinterpret_cast<uintptr_t>(new_buf) + (alignment_ - 1)) &
+          ~static_cast<uintptr_t>(alignment_ - 1));
+    }
 
     if (copy_data) {
       assert(bufstart_ + copy_offset + copy_len <= bufstart_ + cursize_);
@@ -165,7 +181,8 @@ public:
 
     bufstart_ = new_bufstart;
     capacity_ = new_capacity;
-    buf_.reset(new_buf);
+    CustomDeleter deleter(allocator, new_capacity);
+    buf_ = CacheAllocationPtr(new_buf, deleter);
   }
 
   // Append to the buffer.

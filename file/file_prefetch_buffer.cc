@@ -49,8 +49,7 @@ void FilePrefetchBuffer::PrefetchAsync(RandomAccessFileReader* reader, AsyncCont
       chunk_len = buffer_.CurrentSize() - chunk_offset_in_buffer;
       assert(chunk_offset_in_buffer % alignment == 0);
       assert(chunk_len % alignment == 0);
-      assert(chunk_offset_in_buffer + chunk_len <=
-          buffer_offset_ + buffer_.CurrentSize());
+      assert(chunk_offset_in_buffer + chunk_len <= buffer_offset_ + buffer_.CurrentSize());
       if (chunk_len > 0) {
         copy_data_to_new_buffer = true;
       } else {
@@ -61,8 +60,8 @@ void FilePrefetchBuffer::PrefetchAsync(RandomAccessFileReader* reader, AsyncCont
 
   if (buffer_.Capacity() < roundup_len) {
     buffer_.Alignment(alignment);
-    buffer_.AllocateNewBuffer(static_cast<size_t>(roundup_len),
-        copy_data_to_new_buffer, chunk_offset_in_buffer, static_cast<size_t>(chunk_len));
+    buffer_.AllocateNewBuffer(static_cast<size_t>(roundup_len), copy_data_to_new_buffer,
+        chunk_offset_in_buffer, static_cast<size_t>(chunk_len), allocator_);
   } else if (chunk_len > 0) {
     buffer_.RefitTail(static_cast<size_t>(chunk_offset_in_buffer),
         static_cast<size_t>(chunk_len));
@@ -162,8 +161,8 @@ void FilePrefetchBuffer::PrefetchCallback(AsyncContext& context) {
 
 inline void FilePrefetchBuffer::ReadFromCacheDone(AsyncContext& context) {
   *context.read.result = Slice(
-      buffer_.BufferStart() + context.read.handle->offset() - buffer_offset_,
-      context.read.handle->size() + kBlockTrailerSize);
+      buffer_.BufferStart() + context.read.handle.offset() - buffer_offset_,
+      context.read.handle.size() + kBlockTrailerSize);
   context.read.prefetch_buf_hit = true;
   return context.read.block_fetcher->ReadFromCacheCallback(context);
 }

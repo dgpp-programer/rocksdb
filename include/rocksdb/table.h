@@ -316,6 +316,8 @@ struct BlockBasedTableOptions {
 
   IndexShorteningMode index_shortening =
       IndexShorteningMode::kShortenSeparators;
+
+  std::shared_ptr<MemoryAllocator> memory_allocator;
 };
 
 // Table Properties that are specific to block-based table properties.

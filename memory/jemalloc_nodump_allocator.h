@@ -31,7 +31,7 @@ class JemallocNodumpAllocator : public MemoryAllocator {
 
   const char* Name() const override { return "JemallocNodumpAllocator"; }
   void* Allocate(size_t size) override;
-  void Deallocate(void* p) override;
+  void Deallocate(void* p, size_t size) override;
   size_t UsableSize(void* p, size_t allocation_size) const override;
 
  private:

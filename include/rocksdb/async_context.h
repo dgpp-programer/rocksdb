@@ -25,7 +25,6 @@ class Block;
 class ParsedFullFilterBlock;
 class Generic;
 class FilePrefetchBuffer;
-class BlockHandle;
 class BlockFetcher;
 class DataBlockIter;
 class DBImpl;
@@ -63,6 +62,13 @@ typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
 // TODO make sure all pointer refer to no function variable
 
 struct ReadContext {
+  // used by RetrieveBlockAsync
+  uint64_t offset;
+  uint64_t buffer_offset; // used by block alignment
+  uint64_t length;
+  Slice* result;
+  char* scratch;
+  read_complete_cb read_complete;
   DBImpl* db_impl;
   ColumnFamilyData *cfd;
   SuperVersion* sv;
@@ -83,7 +89,7 @@ struct ReadContext {
   FilePrefetchBuffer* prefetch_buffer;
   bool prefetch_buf_hit;
   uint64_t chunk_len;
-  BlockHandle* handle;
+  BlockHandle handle;
   char* cache_key; // TODO when to delete
   char* compressed_cache_key;
   Slice key;
@@ -105,12 +111,6 @@ struct ReadContext {
   } retrieve_block;
   std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
   std::unique_ptr<DataBlockIter> data_iter;
-  // used by RetrieveBlockAsync
-  uint64_t offset;
-  uint64_t length;
-  Slice* result;
-  char* scratch;
-  read_complete_cb read_complete;
 };
 
 struct GetContextArgs {
@@ -132,7 +132,6 @@ struct ScanContextArgs {
 /**
  * NOT THREAD SAFE
  * Can only be used by one thread at a time
- * TODO chenxu14 cache line align
  */
 struct AsyncContext {
   uint64_t start_time;

@@ -11,28 +11,31 @@
 namespace rocksdb {
 
 struct CustomDeleter {
-  CustomDeleter(MemoryAllocator* a = nullptr) : allocator(a) {}
+  CustomDeleter(MemoryAllocator* a = nullptr, size_t s = 0)
+    : allocator(a), size(s) {}
 
   void operator()(char* ptr) const {
     if (allocator) {
-      allocator->Deallocate(reinterpret_cast<void*>(ptr));
+      allocator->Deallocate(reinterpret_cast<void*>(ptr), size);
     } else {
       delete[] ptr;
     }
   }
 
   MemoryAllocator* allocator;
+  size_t size;
 };
 
 using CacheAllocationPtr = std::unique_ptr<char[], CustomDeleter>;
 
 inline CacheAllocationPtr AllocateBlock(size_t size,
                                         MemoryAllocator* allocator) {
+  CustomDeleter deleter(allocator, size);
   if (allocator) {
     auto block = reinterpret_cast<char*>(allocator->Allocate(size));
-    return CacheAllocationPtr(block, allocator);
+    return CacheAllocationPtr(block, deleter);
   }
-  return CacheAllocationPtr(new char[size]);
+  return CacheAllocationPtr(new char[size], deleter);
 }
 
 }  // namespace rocksdb

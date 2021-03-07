@@ -26,7 +26,12 @@ class MemoryAllocator {
   virtual void* Allocate(size_t size) = 0;
 
   // Deallocate previously allocated block. Has to be thread-safe.
-  virtual void Deallocate(void* p) = 0;
+  virtual void Deallocate(void* p, size_t size) = 0;
+
+  // If allocated elements are the same size, return the size value, otherwise return 0
+  virtual size_t ElementSize() const {
+    return 0;
+  }
 
   // Returns the memory size of the block allocated at p. The default
   // implementation that just returns the original allocation_size is fine.
@@ -72,6 +77,26 @@ struct JemallocAllocatorOptions {
 // can be reduce by limitting allocation sizes to cache.
 extern Status NewJemallocNodumpAllocator(
     JemallocAllocatorOptions& options,
+    std::shared_ptr<MemoryAllocator>* memory_allocator);
+
+struct SpdkAllocatorOptions {
+  // total cache numbers
+  size_t count = 6000;
+
+  // element's size, 256kb by default, and 1.5G total
+  size_t ele_size = 262144;
+
+  // per cpu cache numbers, cache_size * number_of_cpus < count
+  size_t cache_size = 512;
+
+  // when allocate failed, do retry
+  size_t retry_number = 100;
+
+  // NUMA id, spdk_mempool don't distributed to NUMA nodes
+  int socket_id = -1;
+};
+
+extern Status NewSpdkMemoryAllocator(SpdkAllocatorOptions& options,
     std::shared_ptr<MemoryAllocator>* memory_allocator);
 
 }  // namespace rocksdb

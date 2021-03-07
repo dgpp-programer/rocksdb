@@ -43,6 +43,7 @@
 #include "rocksdb/env.h"
 #include "rocksdb/filter_policy.h"
 #include "rocksdb/memtablerep.h"
+#include "rocksdb/memory_allocator.h"
 #include "rocksdb/options.h"
 #include "rocksdb/perf_context.h"
 #include "rocksdb/persistent_cache.h"
@@ -3640,6 +3641,10 @@ class Benchmark {
 #endif  // ROCKSDB_LITE
     } else {
       BlockBasedTableOptions block_based_options;
+      SpdkAllocatorOptions allocator_opts;
+      allocator_opts.socket_id = 0;
+      // allocator_opts.cache_size = 0;
+      NewSpdkMemoryAllocator(allocator_opts, &block_based_options.memory_allocator);
       if (FLAGS_use_hash_search) {
         if (FLAGS_prefix_size == 0) {
           fprintf(stderr,
@@ -5698,32 +5703,39 @@ class Benchmark {
     int64_t complete = 0;
     int parallel = FLAGS_queue_depth;
 
-    // TODO chenxu14 make ReadOptions per AsyncContext
-    ReadOptions options(FLAGS_verify_checksum, true);
-    options.total_order_seek = FLAGS_total_order_seek;
-    options.prefix_same_as_start = FLAGS_prefix_same_as_start;
-    options.tailing = FLAGS_use_tailing_iterator;
-    options.readahead_size = FLAGS_readahead_size;
+    std::vector<ReadOptions> options(parallel);
+    std::vector<Slice> keys(parallel);
+
+    for (int i = 0; i < parallel; i++) {
+      ReadOptions option(FLAGS_verify_checksum, true);
+      option.total_order_seek = FLAGS_total_order_seek;
+      option.prefix_same_as_start = FLAGS_prefix_same_as_start;
+      option.tailing = FLAGS_use_tailing_iterator;
+      option.readahead_size = FLAGS_readahead_size;
+      options[i] = option;
+
+      char* data = new char[key_size_];
+      const char* const_data = data;
+      Slice key = Slice(const_data, key_size_);
+      keys[i] = key;
+    }
 
     DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
-    std::unique_ptr<const char[]> key_guard;
-    Slice key = AllocateKey(&key_guard);
     Duration duration(FLAGS_duration, reads_);
     char value_buffer[256];
 
     struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(parallel, sizeof(struct AsyncContext)));
 
     for (int i = 0; i < parallel; i++) {
-      ctx[i].options = &options;
+      ctx[i].options = &options[i];
       ctx[i].cf = db_with_cfh->db->DefaultColumnFamily();
       ctx[i].op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(ctx[i]));
       assert(ctx[i].op.scan.iterator->status().ok());
-    }
 
-    for (int i = 0; i < parallel; i++) {
+      ctx[i].op.scan.startKey = &keys[i];
       int64_t seek_pos = thread->rand.Next() % FLAGS_num;
-      GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, &key);
-      ctx[i].op.scan.startKey = const_cast<Slice*>(&key);
+      GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, ctx[i].op.scan.startKey);
+
       ctx[i].op.scan.seek_callback = [&](AsyncContext& context) {
         bool end = !context.op.scan.iterator->Valid();
         if (!end) {
@@ -5741,7 +5753,7 @@ class Benchmark {
         if (!end) {
           Slice value = context.op.scan.iterator->value();
           memcpy(value_buffer, value.data(), std::min(value.size(), sizeof(value_buffer)));
-          bytes += context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size();
+          bytes += (context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size());
           if (context.op.scan.next_counter < FLAGS_seek_nexts) {
             return context.op.scan.iterator->NextAsync(context);
           } else {
@@ -5756,8 +5768,7 @@ class Benchmark {
             context.op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(context));
             assert(context.op.scan.iterator->status().ok());
             int64_t seek_pos_ = thread->rand.Next() % FLAGS_num;
-            GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos_), FLAGS_num, &key);
-            context.op.scan.startKey = const_cast<Slice*>(&key);
+            GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos_), FLAGS_num, context.op.scan.startKey);
             context.start_time = FLAGS_env->NowMicros();
             read++;
             context.op.scan.iterator->SeekAsync(context);
@@ -5787,6 +5798,9 @@ class Benchmark {
     }
 
     free(ctx);
+    for (int i = 0; i < parallel; i++) {
+      delete keys[i].data();
+    }
   }
 
   void SeekRandom(ThreadState* thread) {

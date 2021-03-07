@@ -274,7 +274,7 @@ void BlockBasedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   context.read.async_cb = this;
   context.read.block_type = BlockType::kFilter;
   context.read.prefetch_buffer = nullptr;
-  context.read.handle = const_cast<BlockHandle*>(&rep->filter_handle);
+  context.read.handle = rep->filter_handle;
   context.read.uncompression_dict = const_cast<UncompressionDict*>(
       &UncompressionDict::GetEmptyDict());
   context.read.for_compaction = false;

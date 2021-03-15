@@ -71,7 +71,7 @@ struct BlockCacheLookupContext {
       : caller(_caller),
         get_id(_get_id),
         get_from_user_specified_snapshot(_get_from_user_specified_snapshot) {}
-  const TableReaderCaller caller;
+  TableReaderCaller caller;
   // These are populated when we perform lookup/insert on block cache. The block
   // cache tracer uses these inforation when logging the block access at
   // BlockBasedTable::GET and BlockBasedTable::MultiGet.
@@ -98,6 +98,20 @@ struct BlockCacheLookupContext {
     block_size = _block_size;
     block_key = _block_key;
     num_keys_in_block = _num_keys_in_block;
+  }
+
+  void reset(const TableReaderCaller& _caller, uint64_t _get_id = 0,
+      bool _get_from_user_specified_snapshot = false) {
+    caller = _caller;
+    get_id = _get_id;
+    get_from_user_specified_snapshot = _get_from_user_specified_snapshot;
+    is_cache_hit = false;
+    no_insert = false;
+    block_type = TraceType::kTraceMax;
+    block_size = 0;
+    block_key.clear();
+    num_keys_in_block = 0;
+    referenced_key.clear();
   }
 };
 

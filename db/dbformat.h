@@ -480,6 +480,12 @@ class IterKey {
 
   bool IsUserKey() const { return is_user_key_; }
 
+  void reset() {
+    ResetBuffer();
+    is_user_key_ = true;
+    key_ = buf_;
+  }
+
  private:
   char* buf_;
   const char* key_;

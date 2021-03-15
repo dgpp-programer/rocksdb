@@ -94,6 +94,9 @@ struct SpdkAllocatorOptions {
 
   // NUMA id, spdk_mempool don't distributed to NUMA nodes
   int socket_id = -1;
+
+  // use spdk_mempool or do spdk_malloc directly
+  bool use_mempool = true;
 };
 
 extern Status NewSpdkMemoryAllocator(SpdkAllocatorOptions& options,

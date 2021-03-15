@@ -5748,17 +5748,32 @@ class Benchmark {
       };
 
       ctx[i].op.scan.next_callback = [&](AsyncContext& context) {
+        if (context.op.scan.next_doing) { // cache hit case
+          context.op.scan.next_doing = false;
+          bytes += (context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size());
+          return;
+        }
         context.op.scan.next_counter++;
         bool end = !context.op.scan.iterator->Valid();
         if (!end) {
           Slice value = context.op.scan.iterator->value();
           memcpy(value_buffer, value.data(), std::min(value.size(), sizeof(value_buffer)));
           bytes += (context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size());
-          if (context.op.scan.next_counter < FLAGS_seek_nexts) {
-            return context.op.scan.iterator->NextAsync(context);
-          } else {
-            end = true;
+          while (context.op.scan.next_counter < FLAGS_seek_nexts) {
+            context.op.scan.next_doing = true;
+            context.op.scan.iterator->NextAsync(context);
+            if (context.op.scan.next_doing) { // no cache hit
+              context.op.scan.next_doing = false; // break current next_callback
+              return; // Jump out of next_callback, prevent stack from being too large
+            } else { // cache hit case
+              if (context.op.scan.iterator->Valid()) {
+                context.op.scan.next_counter++;
+              } else {
+                break;
+              }
+            }
           }
+          end = true;
         }
         if (end) {
           complete++;

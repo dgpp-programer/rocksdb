@@ -137,6 +137,7 @@ LIB_SOURCES =                                                   \
   table/block_based/partitioned_filter_block.cc                 \
   table/block_based/uncompression_dict_reader.cc                \
   table/block_fetcher.cc                             		\
+  table/async_block_fetcher.cc                             		\
   table/cuckoo/cuckoo_table_builder.cc                          \
   table/cuckoo/cuckoo_table_factory.cc                          \
   table/cuckoo/cuckoo_table_reader.cc                           \

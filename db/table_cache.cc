@@ -208,7 +208,11 @@ InternalIterator* TableCache::NewIterator(
       result = NewEmptyInternalIterator<Slice>(arena);
     } else {
       if (context) {
-        context->read.lookup_context.reset(new BlockCacheLookupContext(caller));
+        if (context->read.lookup_context) {
+          context->read.lookup_context->reset(caller);
+        } else {
+          context->read.lookup_context.reset(new BlockCacheLookupContext(caller));
+        }
         result = table_reader->NewAsyncIterator(context, prefix_extractor, arena,
             skip_filters, file_options.compaction_readahead_size);
       } else {

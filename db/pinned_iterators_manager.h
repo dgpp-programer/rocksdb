@@ -25,6 +25,12 @@ class PinnedIteratorsManager : public Cleanable {
     }
   }
 
+  void reset() {
+    if (pinning_enabled) {
+      ReleasePinnedData();
+    }
+  }
+
   // Enable Iterators pinning
   void StartPinning() {
     assert(pinning_enabled == false);

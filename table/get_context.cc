@@ -45,8 +45,8 @@ GetContext::GetContext(
     bool do_merge, SequenceNumber* _max_covering_tombstone_seq, Env* env,
     SequenceNumber* seq, PinnedIteratorsManager* _pinned_iters_mgr,
     ReadCallback* callback, bool* is_blob_index, uint64_t tracing_get_id)
-    : ucmp_(ucmp),
-      merge_operator_(merge_operator),
+    : ucmp_(const_cast<Comparator*>(ucmp)),
+      merge_operator_(const_cast<MergeOperator*>(merge_operator)),
       logger_(logger),
       statistics_(statistics),
       state_(init_state),
@@ -69,6 +69,38 @@ GetContext::GetContext(
   sample_ = should_sample_file_read();
 }
 
+void GetContext::reset(const Comparator* ucmp, const MergeOperator* merge_operator,
+    Logger* logger, Statistics* statistics, GetState init_state,
+    const Slice& user_key, PinnableSlice* pinnable_val, bool* value_found,
+    MergeContext* merge_context, bool do_merge,
+    SequenceNumber* _max_covering_tombstone_seq, Env* env,
+    SequenceNumber* seq, PinnedIteratorsManager* _pinned_iters_mgr,
+    ReadCallback* callback, bool* is_blob_index,
+    uint64_t tracing_get_id) {
+  ucmp_ = const_cast<Comparator*>(ucmp);
+  merge_operator_= const_cast<MergeOperator*>(merge_operator);
+  logger_ = logger;
+  statistics_ = statistics;
+  state_ = init_state;
+  user_key_ = user_key;
+  pinnable_val_ = pinnable_val;
+  value_found_ = value_found;
+  merge_context_ = merge_context;
+  max_covering_tombstone_seq_ = _max_covering_tombstone_seq;
+  env_ = env;
+  seq_ = seq;
+  replay_log_ = nullptr;
+  pinned_iters_mgr_ = _pinned_iters_mgr;
+  callback_ = callback;
+  do_merge_ = do_merge;
+  is_blob_index_ = is_blob_index;
+  tracing_get_id_ = tracing_get_id;
+
+  if (seq_) {
+    *seq_ = kMaxSequenceNumber;
+  }
+  sample_ = should_sample_file_read();
+}
 // Called from TableCache::Get and Table::Get when file/block in which
 // key may exist are not there in TableCache/BlockCache respectively. In this
 // case we can't guarantee that key does not exist and are not permitted to do

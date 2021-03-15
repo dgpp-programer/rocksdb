@@ -268,6 +268,18 @@ class BlockIter : public InternalIteratorBase<TValue> {
     Cleanable::Reset();
   }
 
+  void clearupBase() {
+    data_ = nullptr;
+    key_pinned_ = false;
+    status_ = Status::OK();
+    value_.clear();
+    key_.reset();
+    Cleanable::Reset();
+#ifndef NDEBUG
+    pinned_iters_mgr_ = nullptr;
+#endif
+  }
+
   virtual bool Valid() const override { return current_ < restarts_; }
   virtual Status status() const override { return status_; }
   virtual Slice key() const override {
@@ -391,6 +403,13 @@ class DataBlockIter final : public BlockIter<Slice> {
     read_amp_bitmap_ = read_amp_bitmap;
     last_bitmap_offset_ = current_ + 1;
     data_block_hash_index_ = data_block_hash_index;
+  }
+
+  void clearup() {
+    clearupBase();
+    prev_entries_idx_ = -1;
+    prev_entries_.clear();
+    prev_entries_keys_buff_.clear();
   }
 
   virtual Slice value() const override {

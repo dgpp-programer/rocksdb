@@ -25,7 +25,7 @@ class Block;
 class ParsedFullFilterBlock;
 class Generic;
 class FilePrefetchBuffer;
-class BlockFetcher;
+class AsyncBlockFetcher;
 class DataBlockIter;
 class DBImpl;
 class ReadCallback;
@@ -57,7 +57,7 @@ public:
   }
 };
 
-typedef void (BlockFetcher::*read_complete_cb)(AsyncContext &ctx);
+typedef void (AsyncBlockFetcher::*read_complete_cb)();
 
 // TODO make sure all pointer refer to no function variable
 
@@ -72,6 +72,7 @@ struct ReadContext {
   DBImpl* db_impl;
   ColumnFamilyData *cfd;
   SuperVersion* sv;
+  // TODO chenxu14 use continuous memory
   std::unique_ptr<GetContext> getCtx;
   struct {
     std::unique_ptr<LookupKey> lkey;
@@ -95,10 +96,8 @@ struct ReadContext {
   Slice key;
   Slice ckey;
   UncompressionDict* uncompression_dict;
-  // TODO chenxu14 consider add reset method with pointer Entry
-  // or use SPDK's memory pool
   std::unique_ptr<BlockCacheLookupContext> lookup_context;
-  std::unique_ptr<BlockFetcher> block_fetcher;
+  std::unique_ptr<AsyncBlockFetcher> block_fetcher;
   std::unique_ptr<BlockContents> raw_block_contents;
   AsyncCallback* async_cb;
   IteratorCallback* index_iter_cb;
@@ -152,6 +151,7 @@ struct AsyncContext {
       std::function<void(AsyncContext&)> seek_callback;
       std::function<void(AsyncContext&)> next_callback;
       int32_t next_counter;
+      bool next_doing;
       struct ScanContextArgs args;
     } scan;
   } op;

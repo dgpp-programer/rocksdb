@@ -8,7 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "file/file_prefetch_buffer.h"
-#include "table/block_fetcher.h"
+#include "table/async_block_fetcher.h"
 #include <algorithm>
 #include <mutex>
 
@@ -27,7 +27,7 @@ void FilePrefetchBuffer::PrefetchAsync(RandomAccessFileReader* reader, AsyncCont
     context.status = Status::OK();
     return PrefetchCallback(context);
   }
-  size_t alignment = reader->file()->GetRequiredBufferAlignment();
+  size_t alignment = kDefaultPageSize; // TODO chenxu14 consider spdk_bs_get_io_unit_size
   size_t offset_ = static_cast<size_t>(context.read.offset);
   uint64_t rounddown_offset = Rounddown(offset_, alignment);
   uint64_t roundup_end = Roundup(offset_ + context.read.length, alignment);
@@ -71,7 +71,7 @@ void FilePrefetchBuffer::PrefetchAsync(RandomAccessFileReader* reader, AsyncCont
   context.read.length = roundup_len - chunk_len;
   context.read.scratch = buffer_.BufferStart() + chunk_len;
   context.read.chunk_len = chunk_len;
-  context.read.read_complete = &BlockFetcher::PrefetchDone;
+  context.read.read_complete = &AsyncBlockFetcher::PrefetchDone;
   return reader->ReadAsync(context);
 }
 
@@ -153,7 +153,7 @@ Status FilePrefetchBuffer::Prefetch(RandomAccessFileReader* reader,
 void FilePrefetchBuffer::PrefetchCallback(AsyncContext& context) {
   if (!context.status.ok()) {
     context.read.prefetch_buf_hit = false;
-    return context.read.block_fetcher->ReadFromCacheCallback(context);
+    return context.read.block_fetcher->ReadFromCacheCallback();
   }
   readahead_size_ = std::min(max_readahead_size_, readahead_size_ * 2);
   ReadFromCacheDone(context);
@@ -164,7 +164,7 @@ inline void FilePrefetchBuffer::ReadFromCacheDone(AsyncContext& context) {
       buffer_.BufferStart() + context.read.handle.offset() - buffer_offset_,
       context.read.handle.size() + kBlockTrailerSize);
   context.read.prefetch_buf_hit = true;
-  return context.read.block_fetcher->ReadFromCacheCallback(context);
+  return context.read.block_fetcher->ReadFromCacheCallback();
 }
 
 void FilePrefetchBuffer::TryReadFromCacheAsync(AsyncContext& context) {
@@ -173,7 +173,7 @@ void FilePrefetchBuffer::TryReadFromCacheAsync(AsyncContext& context) {
   }
   if (!enable_ || context.read.offset < buffer_offset_) {
     context.read.prefetch_buf_hit = false;
-    return context.read.block_fetcher->ReadFromCacheCallback(context);
+    return context.read.block_fetcher->ReadFromCacheCallback();
   }
   if (context.read.offset + context.read.length > buffer_offset_ + buffer_.CurrentSize()) {
     if (readahead_size_ > 0) {
@@ -187,7 +187,7 @@ void FilePrefetchBuffer::TryReadFromCacheAsync(AsyncContext& context) {
       return PrefetchAsync(file_reader_, context);
     } else {
       context.read.prefetch_buf_hit = false;
-      return context.read.block_fetcher->ReadFromCacheCallback(context);
+      return context.read.block_fetcher->ReadFromCacheCallback();
     }
   }
   ReadFromCacheDone(context);

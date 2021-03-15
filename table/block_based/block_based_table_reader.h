@@ -295,7 +295,7 @@ class BlockBasedTable : public TableReader, public AsyncCallback {
   friend class BlockBasedFilterBlockReader;
   friend class FullFilterBlockReader;
   friend class BinarySearchIndexReader;
-  friend class BlockFetcher;
+  friend class AsyncBlockFetcher;
   BlockCacheTracer* const block_cache_tracer_;
 
   void UpdateCacheHitMetrics(BlockType block_type, GetContext* get_context,

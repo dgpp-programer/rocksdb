@@ -16,9 +16,11 @@ namespace rocksdb {
 class SpdkMemoryAllocator : public MemoryAllocator {
  public:
   SpdkMemoryAllocator(SpdkAllocatorOptions& options) : options_(options) {
-    mem_pool = spdk_mempool_create("spdk_memory_allocator",
-        options.count, options.ele_size, options.cache_size,
-        options.socket_id);
+    if (options_.use_mempool) {
+      mem_pool = spdk_mempool_create("spdk_memory_allocator",
+          options.count, options.ele_size, options.cache_size,
+          options.socket_id);
+    }
   }
 
   ~SpdkMemoryAllocator() {
@@ -31,7 +33,7 @@ class SpdkMemoryAllocator : public MemoryAllocator {
   const char* Name() const override { return "SpdkMemoryAllocator"; }
 
   void* Allocate(size_t size) override {
-    if (size < options_.ele_size) {
+    if (options_.use_mempool && size <= options_.ele_size) {
       size_t count = 0;
       void* buf;
       do {
@@ -52,7 +54,7 @@ class SpdkMemoryAllocator : public MemoryAllocator {
   }
 
   void Deallocate(void* p, size_t size) override {
-    if (size < options_.ele_size) {
+    if (options_.use_mempool && size <= options_.ele_size) {
       spdk_mempool_put(mem_pool, p);
     } else {
       spdk_free(p);

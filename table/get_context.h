@@ -97,6 +97,15 @@ class GetContext {
 
   GetContext() = delete;
 
+  void reset(const Comparator* ucmp, const MergeOperator* merge_operator,
+      Logger* logger, Statistics* statistics, GetState init_state,
+      const Slice& user_key, PinnableSlice* value, bool* value_found,
+      MergeContext* merge_context, bool do_merge,
+      SequenceNumber* max_covering_tombstone_seq, Env* env,
+      SequenceNumber* seq, PinnedIteratorsManager* _pinned_iters_mgr,
+      ReadCallback* callback, bool* is_blob_index,
+      uint64_t tracing_get_id);
+
   // This can be called to indicate that a key may be present, but cannot be
   // confirmed due to IO not allowed
   void MarkKeyMayExist();
@@ -150,8 +159,8 @@ class GetContext {
   void push_operand(const Slice& value, Cleanable* value_pinner);
 
  private:
-  const Comparator* ucmp_;
-  const MergeOperator* merge_operator_;
+  Comparator* ucmp_;
+  MergeOperator* merge_operator_;
   // the merge operations encountered;
   Logger* logger_;
   Statistics* statistics_;
@@ -177,7 +186,7 @@ class GetContext {
   bool* is_blob_index_;
   // Used for block cache tracing only. A tracing get id uniquely identifies a
   // Get or a MultiGet.
-  const uint64_t tracing_get_id_;
+  uint64_t tracing_get_id_;
  friend class Version;
 };
 

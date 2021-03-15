@@ -40,6 +40,7 @@
 #include "table/block_based/filter_block.h"
 #include "table/block_based/full_filter_block.h"
 #include "table/block_based/partitioned_filter_block.h"
+#include "table/async_block_fetcher.h"
 #include "table/block_fetcher.h"
 #include "table/format.h"
 #include "table/get_context.h"
@@ -68,7 +69,7 @@ typedef BlockBasedTable::IndexReader IndexReader;
 
 // Found that 256 KB readahead size provides the best performance, based on
 // experiments, for auto readahead. Experiment data is in PR #3282.
-const size_t BlockBasedTable::kMaxAutoReadaheadSize = 256 * 1024;
+const size_t BlockBasedTable::kMaxAutoReadaheadSize = 32 * 1024;
 
 BlockBasedTable::~BlockBasedTable() {
   delete rep_;
@@ -453,9 +454,15 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
     context.read.prefetch_buffer = nullptr;
     context.read.for_compaction = false;
     context.read.async_cb = const_cast<BlockBasedTable*>(table_);
-    context.read.lookup_context.reset(new BlockCacheLookupContext(
-        TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
-        /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+    if (context.read.lookup_context) {
+      context.read.lookup_context->reset(TableReaderCaller::kUserGet,
+          context.read.getCtx->get_tracing_get_id(),
+          /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr);
+    } else {
+      context.read.lookup_context.reset(new BlockCacheLookupContext(
+          TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+          /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+    }
     context.read.uncompression_dict = const_cast<UncompressionDict*>(
         uncompression_dict.GetValue() ? uncompression_dict.GetValue()
             : &UncompressionDict::GetEmptyDict());
@@ -2780,9 +2787,8 @@ void BlockBasedTable::RetrieveMultipleBlocks(
 }
 
 void BlockBasedTable::RetrieveBlockDone(AsyncContext& context) {
-  DataBlockIter* iter = new DataBlockIter();
   if (!context.status.ok()) {
-    context.read.data_iter.reset(iter);
+    context.read.data_iter.reset(new DataBlockIter());
     context.read.data_iter->Invalidate(context.status);
     return get_rep()->index_reader->NewDataBlockIteratorCallback(context);
   }
@@ -2791,9 +2797,15 @@ void BlockBasedTable::RetrieveBlockDone(AsyncContext& context) {
 
   const bool block_contents_pinned = block->IsCached() ||
       (!block->GetValue()->own_bytes() && rep_->immortal_table);
-  auto it = InitBlockIterator<DataBlockIter>(rep_, block->GetValue(), iter,
-      block_contents_pinned);
-  context.read.data_iter.reset(it);
+
+  if (context.read.data_iter) {
+    context.read.data_iter->clearup();
+  } else {
+    context.read.data_iter.reset(new DataBlockIter());
+  }
+  block->GetValue()->NewDataIterator(
+      &rep_->internal_comparator, rep_->internal_comparator.user_comparator(),
+	  context.read.data_iter.get(), rep_->ioptions.statistics, block_contents_pinned);
 
   if (!block->IsCached()) {
     if (!context.options->fill_cache && rep_->cache_key_prefix_size != 0) {
@@ -2863,23 +2875,19 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context) const {
     context.status = Status::Incomplete("no blocking io");
     return context.read.async_cb->RetrieveBlockDone(context);
   }
-  const bool maybe_compressed =
-      context.read.block_type != BlockType::kFilter &&
-      context.read.block_type != BlockType::kCompressionDictionary &&
-          rep_->blocks_maybe_compressed;
-  const bool do_uncompress = maybe_compressed;
 
-  context.read.raw_block_contents.reset(new BlockContents());
-  // TODO chenxu14 move BlockFetcher to TableReader? race condition?
-  context.read.block_fetcher.reset(new BlockFetcher(
-      rep_->file.get(), context.read.prefetch_buffer, rep_->footer, *context.options,
-      context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions,
-      do_uncompress, maybe_compressed, context.read.block_type, *context.read.uncompression_dict,
-      rep_->persistent_cache_options, rep_->table_options.memory_allocator.get(), nullptr,
-      context.read.for_compaction, this));
-
+  if (context.read.raw_block_contents) {
+    context.read.raw_block_contents->clear();
+  } else {
+    context.read.raw_block_contents.reset(new BlockContents());
+  }
+  if (context.read.block_fetcher) {
+    context.read.block_fetcher->reset(this, &context);
+  } else {
+    context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+  }
   context.read.read_contents_no_cache = true;
-  context.read.block_fetcher->ReadBlockContentsAsync(context);
+  context.read.block_fetcher->ReadBlockContentsAsync();
 }
 
 void BlockBasedTable::MaybeReadBlockAndLoadToCacheCallback(
@@ -2954,21 +2962,19 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
 
     // Can't find the block from the cache. If I/O is allowed, read from the file.
     if (block_entry->GetValue() == nullptr && !no_io && context.options->fill_cache) {
-      const bool maybe_compressed =
-          context.read.block_type != BlockType::kFilter &&
-          context.read.block_type != BlockType::kCompressionDictionary &&
-              rep_->blocks_maybe_compressed;
-      const bool do_uncompress = maybe_compressed && !block_cache_compressed;
-      context.read.raw_block_contents.reset(new BlockContents());
+      if (context.read.raw_block_contents) {
+        context.read.raw_block_contents->clear();
+      } else {
+        context.read.raw_block_contents.reset(new BlockContents());
+      }
       if (!contents) {
-        context.read.block_fetcher.reset(new BlockFetcher(
-            rep_->file.get(), context.read.prefetch_buffer, rep_->footer, *context.options,
-            context.read.handle, context.read.raw_block_contents.get(), rep_->ioptions, do_uncompress,
-            maybe_compressed, context.read.block_type, *context.read.uncompression_dict,
-            rep_->persistent_cache_options, GetMemoryAllocator(rep_->table_options),
-            GetMemoryAllocatorForCompressedBlock(rep_->table_options), false, this));
+        if (context.read.block_fetcher) {
+          context.read.block_fetcher->reset(this, &context);
+        } else {
+          context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+        }
         context.read.read_contents_no_cache = false;
-        return context.read.block_fetcher->ReadBlockContentsAsync(context);
+        return context.read.block_fetcher->ReadBlockContentsAsync();
       } else {
         if (context.status.ok()) {
           context.status = PutDataBlockToCache(context.read.key, context.read.ckey,
@@ -3308,14 +3314,19 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekToFirst() {
 
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::IteratorDone() {
-  // TODO chenxu14 consider reduce branch counts
-  return context_->op.scan.args.iter_seek ? context_->op.scan.args.iter_cb->SeekDone(*context_)
-      : context_->op.scan.args.iter_cb->NextDone(*context_);
+  if (UNLIKELY(context_->op.scan.args.iter_seek)) {
+    return context_->op.scan.args.iter_cb->SeekDone(*context_);
+  } else {
+    return context_->op.scan.args.iter_cb->NextDone(*context_);
+  }
 }
 
 void BlockBasedTableIndexIterator::IteratorDone() {
-  return context_->read.index_iter_seek ? context_->read.index_iter_cb->SeekDone(*context_)
-      : context_->read.index_iter_cb->NextDone(*context_);
+  if (UNLIKELY(context_->read.index_iter_seek)) {
+    return context_->read.index_iter_cb->SeekDone(*context_);
+  } else {
+    return context_->read.index_iter_cb->NextDone(*context_);
+  }
 }
 
 template <class TBlockIter, typename TValue>
@@ -3330,7 +3341,7 @@ void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForwardCallback() {
 
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsyncCallback() {
-  if (target_) {
+  if (LIKELY(target_ != nullptr)) {
     block_iter_.Seek(*target_);
   } else {
     block_iter_.SeekToFirst();
@@ -3819,8 +3830,8 @@ void BlockBasedTableIterator<TBlockIter, TValue>::MaterializeCurrentBlockCallbac
   assert(block_iter_points_to_real_block_);
   block_iter_.SeekToFirst();
 
-  if (!block_iter_.Valid() || icomp_.Compare(block_iter_.key(),
-      index_iter_->value().first_internal_key) != 0) {
+  if (UNLIKELY(!block_iter_.Valid() || icomp_.Compare(block_iter_.key(),
+      index_iter_->value().first_internal_key) != 0)) {
     block_iter_.Invalidate(Status::Corruption(
         "first key in index doesn't match first key in block"));
     materialize_current_block = false;
@@ -3867,10 +3878,10 @@ template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForwardAsync() {
   assert(!is_out_of_bound_);
   assert(block_iter_points_to_real_block_);
-  if (!block_iter_.Valid()) {
-    FindBlockForwardAsync();
-  } else {
+  if (LIKELY(block_iter_.Valid())) {
     FindKeyForwardCallback();
+  } else {
+    FindBlockForwardAsync();
   }
 }
 
@@ -3895,7 +3906,7 @@ void BlockBasedTableIterator<TBlockIter, TValue>::FindKeyForward() {
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::FindBlockForwardCallback() {
   block_iter_.SeekToFirst();
-  if (!block_iter_.Valid()) {
+  if (UNLIKELY(!block_iter_.Valid())) {
     FindBlockForwardAsync();
   } else {
     FindKeyForwardCallback();
@@ -4176,9 +4187,14 @@ void BlockBasedTable::GetAsyncCallback(AsyncContext& context) {
 }
 
 void BlockBasedTable::GetAsync(AsyncContext& context) {
-  context.read.lookup_context.reset(new BlockCacheLookupContext (
-      TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
-      context.options->snapshot != nullptr));
+  if (context.read.lookup_context) {
+    context.read.lookup_context->reset(TableReaderCaller::kUserGet,
+        context.read.getCtx->get_tracing_get_id(), context.options->snapshot != nullptr);
+  } else {
+    context.read.lookup_context.reset(new BlockCacheLookupContext (
+        TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+        context.options->snapshot != nullptr));
+  }
   if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
     context.read.lookup_context->referenced_key =
         context.read.key_info.internal_key.ToString();

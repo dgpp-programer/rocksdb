@@ -157,7 +157,7 @@ public:
     if (allocator) {
       if (requested_capacity < allocator->ElementSize()) {
         // In case allocator only allocate same size elements
-        new_capacity =  allocator->ElementSize();
+        new_capacity = allocator->ElementSize();
       }
       new_buf = reinterpret_cast<char*>(allocator->Allocate(new_capacity));
       // allocator will do alignment themselves

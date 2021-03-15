@@ -485,6 +485,44 @@ class FilePickerMultiGet {
 };
 }  // anonymous namespace
 
+void FilePicker::reset(std::vector<FileMetaData*>* files, const Slice& user_key,
+      const Slice& ikey, autovector<LevelFilesBrief>* file_levels,
+      unsigned int num_levels, FileIndexer* file_indexer,
+      const Comparator* user_comparator,
+      const InternalKeyComparator* internal_comparator) {
+  num_levels_ = num_levels;
+  curr_level_ = static_cast<unsigned int>(-1);
+  returned_file_level_ = static_cast<unsigned int>(-1);
+  hit_file_level_ = static_cast<unsigned int>(-1);
+  search_left_bound_ = 0;
+  search_right_bound_ = FileIndexer::kLevelMaxIndex;
+#ifndef NDEBUG
+  files_ = files;
+#endif
+  level_files_brief_ = file_levels;
+  is_hit_file_last_in_level_ = false;
+  curr_file_level_ = nullptr;
+  user_key_ = user_key;
+  ikey_ = ikey;
+  file_indexer_ = file_indexer;
+  user_comparator_ = const_cast<Comparator*>(user_comparator);
+  internal_comparator_ = const_cast<InternalKeyComparator*>(internal_comparator);
+#ifdef NDEBUG
+  (void)files;
+#endif
+  // Setup member variables to search first level.
+  search_ended_ = !PrepareNextLevel();
+  if (!search_ended_) {
+    // Prefetch Level 0 table data to avoid cache miss if possible.
+    for (unsigned int i = 0; i < (*level_files_brief_)[0].num_files; ++i) {
+      auto* r = (*level_files_brief_)[0].files[i].fd.table_reader;
+      if (r) {
+        r->Prepare(ikey);
+      }
+    }
+  }
+}
+
 bool FilePicker::PrepareNextLevel() {
   curr_level_++;
   while (curr_level_ < num_levels_) {
@@ -1875,23 +1913,42 @@ void Version::GetAsyncDone(AsyncContext& ctx_) {
 
 void Version::GetAsync(AsyncContext& context) {
   assert(context.status.ok() || context.status.IsMergeInProgress());
-
-  context.op.get.args.pinned_iters_mgr.reset(new PinnedIteratorsManager());
-  context.read.getCtx.reset(new GetContext(
-      user_comparator(), merge_operator_, info_log_, db_statistics_,
-      context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
-      context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
-      &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
-      merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
-      BlockCacheTraceHelper::kReservedGetId));
-
+  if (context.op.get.args.pinned_iters_mgr) {
+    context.op.get.args.pinned_iters_mgr->reset();
+  } else {
+    context.op.get.args.pinned_iters_mgr.reset(new PinnedIteratorsManager());
+  }
+  if (context.read.getCtx) {
+    context.read.getCtx->reset(
+        user_comparator(), merge_operator_, info_log_, db_statistics_,
+        context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
+        context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
+        &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
+        merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
+        BlockCacheTraceHelper::kReservedGetId);
+  } else {
+    context.read.getCtx.reset(new GetContext(
+        user_comparator(), merge_operator_, info_log_, db_statistics_,
+        context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
+        context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
+        &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
+        merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
+        BlockCacheTraceHelper::kReservedGetId));
+  }
   if (merge_operator_) {
     context.op.get.args.pinned_iters_mgr->StartPinning();
   }
-  context.op.get.args.fp.reset(new FilePicker(
-      storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
-      &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
-      user_comparator(), internal_comparator()));
+  if (context.op.get.args.fp) {
+    context.op.get.args.fp->reset(
+        storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
+        &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
+        user_comparator(), internal_comparator());
+  } else {
+    context.op.get.args.fp.reset(new FilePicker(
+        storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
+        &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
+        user_comparator(), internal_comparator()));
+  }
 
   IterateNextFile(context);
 }

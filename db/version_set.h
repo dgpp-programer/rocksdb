@@ -792,8 +792,8 @@ class FilePicker {
         user_key_(user_key),
         ikey_(ikey),
         file_indexer_(file_indexer),
-        user_comparator_(user_comparator),
-        internal_comparator_(internal_comparator) {
+        user_comparator_(const_cast<Comparator*>(user_comparator)),
+        internal_comparator_(const_cast<InternalKeyComparator*>(internal_comparator)) {
 #ifdef NDEBUG
     (void)files;
 #endif
@@ -809,6 +809,12 @@ class FilePicker {
       }
     }
   }
+
+  void reset(std::vector<FileMetaData*>* files, const Slice& user_key,
+      const Slice& ikey, autovector<LevelFilesBrief>* file_levels,
+      unsigned int num_levels, FileIndexer* file_indexer,
+      const Comparator* user_comparator,
+      const InternalKeyComparator* internal_comparator);
 
   // Setup local variables to search next level.
   // Returns false if there are no more levels to search.
@@ -845,8 +851,8 @@ class FilePicker {
   Slice user_key_;
   Slice ikey_;
   FileIndexer* file_indexer_;
-  const Comparator* user_comparator_;
-  const InternalKeyComparator* internal_comparator_;
+  Comparator* user_comparator_;
+  InternalKeyComparator* internal_comparator_;
 #ifndef NDEBUG
   FdWithKeyRange* prev_file_;
 #endif

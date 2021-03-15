@@ -1570,9 +1570,17 @@ void DBImpl::GetAsync(AsyncContext& context) {
   ReadOptions* read_options = context.options;
   SequenceNumber snapshot = last_seq_same_as_publish_seq_
       ? versions_->LastSequence() : versions_->LastPublishedSequence();
-  context.op.get.args.merge_context.reset(new MergeContext());
+  if (context.op.get.args.merge_context) {
+    context.op.get.args.merge_context->reset();
+  } else {
+    context.op.get.args.merge_context.reset(new MergeContext());
+  }
   context.op.get.args.max_covering_tombstone_seq = 0;
-  context.read.key_info.lkey.reset(new LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+  if (context.read.key_info.lkey) {
+    context.read.key_info.lkey->reset(*context.op.get.key, snapshot, read_options->timestamp);
+  } else {
+    context.read.key_info.lkey.reset(new LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+  }
   context.read.key_info.internal_key = context.read.key_info.lkey->internal_key();
   context.read.key_info.user_key = context.read.key_info.lkey->user_key();
 

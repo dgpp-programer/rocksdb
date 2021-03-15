@@ -28,6 +28,11 @@ class MergeContext {
     }
   }
 
+  void reset() {
+    Clear();
+    operands_reversed_ = true;
+  }
+
   // Push a merge operand
   void PushOperand(const Slice& operand_slice, bool operand_pinned = false) {
     Initialize();

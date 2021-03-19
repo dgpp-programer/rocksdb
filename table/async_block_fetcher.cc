@@ -69,46 +69,27 @@ inline void AsyncBlockFetcher::CheckBlockChecksum() {
 }
 
 void AsyncBlockFetcher::ReadFromCacheCallback() {
-  if (context_->read.prefetch_buf_hit) {
+  if (context_->op.scan.args.prefetch_buf_hit) {
     got_from_prefetch_buffer_ = true;
     CheckBlockChecksum();
-    if (context_->status.ok()) {
-      used_buf_ = const_cast<char*>(slice_.data());
-    }
   }
   GetFromPrefetchBufferCallback();
 }
 
 inline void AsyncBlockFetcher::PrepareBufferForBlockFromFile() {
   // refer __get_page_parameters to do block alignment
-  uint32_t lba_size = kDefaultPageSize; // TODO chenxu14 consider spdk_bs_get_io_unit_size
+  uint32_t lba_size = table_->get_rep()->file->file()->GetRequiredBufferAlignment();
   uint64_t start_lba = context_->read.handle.offset() / lba_size;
   uint64_t end_lba = (context_->read.handle.offset() +
       context_->read.handle.size() + kBlockTrailerSize - 1) / lba_size;
   uint64_t num_lba = (end_lba - start_lba + 1);
   heap_buf_ = AllocateBlock(num_lba * lba_size, table_->get_rep()->table_options.memory_allocator.get());
-  used_buf_ = heap_buf_.get();
-}
-
-inline void AsyncBlockFetcher::CopyBufferToHeap() {
-  assert(used_buf_ != heap_buf_.get());
-  heap_buf_ = AllocateBlock(context_->read.handle.size() + kBlockTrailerSize,
-      table_->get_rep()->table_options.memory_allocator.get());
-  memcpy(heap_buf_.get(), used_buf_, context_->read.handle.size() + kBlockTrailerSize);
 }
 
 inline void AsyncBlockFetcher::GetBlockContents() {
-  if (slice_.data() != used_buf_) {
-    // the slice content is not the buffer provided
-    context_->read.raw_block_contents->reset(Slice(slice_.data(), context_->read.handle.size()));
-  } else {
-    // page can be either uncompressed or compressed, the buffer either stack
-    // or heap provided. Refer to https://github.com/facebook/rocksdb/pull/4096
-    if (got_from_prefetch_buffer_) {
-      CopyBufferToHeap();
-    }
-    context_->read.raw_block_contents->reset(std::move(heap_buf_), context_->read.handle.size());
-  }
+  // [NOTICE] chenxu14 skip CopyBufferToHeap, is it really need?
+  context_->read.raw_block_contents->reset(std::move(heap_buf_),
+      Slice(slice_.data(), context_->read.handle.size()));
 #ifndef NDEBUG
   context_->read.raw_block_contents->is_raw_block = true;
 #endif
@@ -132,9 +113,10 @@ void AsyncBlockFetcher::ReadBlockContentsDone() {
 
 void AsyncBlockFetcher::PrefetchDone() {
   if (context_->status.ok()) {
-    context_->read.prefetch_buffer->buffer_offset_ = context_->read.offset - context_->read.chunk_len;
-    context_->read.prefetch_buffer->buffer_.Size(static_cast<size_t>(context_->read.chunk_len)
-        + context_->read.result->size());
+    context_->read.prefetch_buffer->buffer_offset_ =
+        context_->read.offset - context_->op.scan.args.chunk_len;
+    context_->read.prefetch_buffer->buffer_.Size(
+        static_cast<size_t>(context_->op.scan.args.chunk_len) + context_->read.result->size());
   }
   context_->read.prefetch_buffer->PrefetchCallback(*context_);
 }
@@ -176,18 +158,17 @@ void AsyncBlockFetcher::GetFromPrefetchBufferCallback() {
     if (!context_->status.ok()) {
       return ReadBlockContentsDone();
     }
+    GetBlockContents();
+    return ReadBlockContentsDone();
   } else {
-    PrepareBufferForBlockFromFile();
+    PrepareBufferForBlockFromFile(); // allocate heap_buf_ as payload
     context_->read.offset = context_->read.handle.offset();
     context_->read.length = context_->read.handle.size() + kBlockTrailerSize;
     context_->read.result = &slice_;
-    context_->read.scratch = used_buf_;
+    context_->read.scratch = heap_buf_.get();
     context_->read.read_complete = &AsyncBlockFetcher::ReadBlockContentsCallback;
     return table_->get_rep()->file->ReadAsync(*context_);
   }
-
-  GetBlockContents();
-  return ReadBlockContentsDone();
 }
 
 void AsyncBlockFetcher::ReadBlockContentsAsync() {

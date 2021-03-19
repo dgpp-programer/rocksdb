@@ -802,9 +802,11 @@ bool SomeFileOverlapsRange(
   return !BeforeFile(ucmp, largest_user_key, &file_level.files[index]);
 }
 
-namespace {
+class LevelIterator;
 
-class LevelIterator final : public InternalIterator {
+typedef void (LevelIterator::*skip_empty_file_cb)(AsyncContext& context);
+
+class LevelIterator final : public InternalIterator, public IteratorCallback {
  public:
   LevelIterator(TableCache* table_cache, const ReadOptions& read_options,
                 const FileOptions& file_options,
@@ -814,7 +816,7 @@ class LevelIterator final : public InternalIterator {
                 HistogramImpl* file_read_hist, TableReaderCaller caller,
                 bool skip_filters, int level, RangeDelAggregator* range_del_agg,
                 const std::vector<AtomicCompactionUnitBoundary>* compaction_boundaries = nullptr,
-                AsyncContext* context = nullptr)
+                AsyncContext* context = nullptr, MergingIterator* parent = nullptr)
       : table_cache_(table_cache),
         read_options_(read_options),
         file_options_(file_options),
@@ -832,7 +834,8 @@ class LevelIterator final : public InternalIterator {
         range_del_agg_(range_del_agg),
         pinned_iters_mgr_(nullptr),
         compaction_boundaries_(compaction_boundaries),
-        context_(context) {
+        context_(context),
+        parent_(parent) {
     // Empty level is not supported.
     assert(flevel_ != nullptr && flevel_->num_files > 0);
   }
@@ -841,13 +844,14 @@ class LevelIterator final : public InternalIterator {
 
   void Seek(const Slice& target) override;
   void SeekAsync(AsyncContext& context) override;
-  void SeekCallback(AsyncContext& context) override;
   void SeekForPrev(const Slice& target) override;
   void SeekToFirst() override;
+  void SeekToFirstAsync(AsyncContext& context) override;
   void SeekToLast() override;
+  void SeekDone(AsyncContext& context) override;
   void Next() final override;
   void NextAsync(AsyncContext& context) final override;
-  void NextCallback(AsyncContext& context) override;
+  void NextDone(AsyncContext& context) final override;
   bool NextAndGetResult(IterateResult* result) override;
   void Prev() override;
 
@@ -896,6 +900,9 @@ class LevelIterator final : public InternalIterator {
  private:
   // Return true if at least one invalid file is seen and skipped.
   bool SkipEmptyFileForward();
+  void SkipEmptyFileForwardAsync(AsyncContext& context);
+  void NextCallback(AsyncContext& context);
+  void SeekCallback(AsyncContext& context);
   void SkipEmptyFileBackward();
   void SetFileIterator(InternalIterator* iter);
   void InitFileIterator(size_t new_file_index);
@@ -979,15 +986,16 @@ class LevelIterator final : public InternalIterator {
   // tombstones.
   const std::vector<AtomicCompactionUnitBoundary>* compaction_boundaries_;
   AsyncContext* context_;
+  MergingIterator* parent_;
+  skip_empty_file_cb skip_file_cb;
 };
 
 void LevelIterator::SeekCallback(AsyncContext& context) {
-  // TODO chenxu14 async SkipEmptyFileForward
-  if (file_iter_.iter() != nullptr) {
-    file_iter_.Update();
-  }
-  if (SkipEmptyFileForward() && prefix_extractor_ != nullptr &&
-      file_iter_.iter() != nullptr && file_iter_.Valid()) {
+  if (context.op.scan.args.seen_empty_file &&
+      !context.read.key_info.internal_key.empty() &&
+      prefix_extractor_ != nullptr &&
+      file_iter_.iter() != nullptr &&
+      file_iter_.Valid()) {
     Slice target_user_key = ExtractUserKey(context.read.key_info.internal_key);
     Slice file_user_key = ExtractUserKey(file_iter_.key());
     if (prefix_extractor_->InDomain(target_user_key) &&
@@ -999,9 +1007,26 @@ void LevelIterator::SeekCallback(AsyncContext& context) {
     }
   }
   CheckMayBeOutOfLowerBound();
+  parent_->SeekDone(context);
+}
+
+void LevelIterator::SeekDone(AsyncContext& context) {
+  if (file_iter_.iter() != nullptr) {
+    file_iter_.Update();
+  }
+  if (context.op.scan.args.skip_doing) {
+    return SkipEmptyFileForwardAsync(context);
+  } else {
+    skip_file_cb = &LevelIterator::SeekCallback;
+    context.op.scan.args.seen_empty_file = false;
+    return SkipEmptyFileForwardAsync(context);
+  }
 }
 
 void LevelIterator::SeekAsync(AsyncContext& context) {
+  context.op.scan.args.iter_cb = this;
+  context.op.scan.args.iter_seek = true;
+  context.op.scan.args.skip_doing = false;
   bool need_to_reseek = true;
   if (file_iter_.iter() != nullptr && file_index_ < flevel_->num_files) {
     const FdWithKeyRange& cur_file = flevel_->files[file_index_];
@@ -1023,7 +1048,7 @@ void LevelIterator::SeekAsync(AsyncContext& context) {
     return file_iter_.SeekAsync(context);
     // file_iter_.Seek(context.read.key_info.internal_key);
   }
-  context.op.scan.args.iter_cb->SeekDone(context);
+  SeekDone(context);
 }
 
 void LevelIterator::Seek(const Slice& target) {
@@ -1101,6 +1126,17 @@ void LevelIterator::SeekToFirst() {
   CheckMayBeOutOfLowerBound();
 }
 
+void LevelIterator::SeekToFirstAsync(AsyncContext& context) {
+  context.op.scan.args.iter_cb = this;
+  context.op.scan.args.iter_seek = true;
+  context.op.scan.args.skip_doing = false;
+  InitFileIterator(0);
+  if (file_iter_.iter() != nullptr) {
+    return file_iter_.SeekToFirstAsync(context);
+  }
+  SeekDone(context);
+}
+
 void LevelIterator::SeekToLast() {
   InitFileIterator(flevel_->num_files - 1);
   if (file_iter_.iter() != nullptr) {
@@ -1110,14 +1146,49 @@ void LevelIterator::SeekToLast() {
   CheckMayBeOutOfLowerBound();
 }
 
-void LevelIterator::NextCallback(AsyncContext&) {
-  file_iter_.Update();
-  SkipEmptyFileForward(); // TODO chenxu14 make this async
+void LevelIterator::NextCallback(AsyncContext& context) {
+  parent_->NextDone(context);
+}
+
+void LevelIterator::NextDone(AsyncContext& context) {
+  if (file_iter_.iter() != nullptr) {
+    file_iter_.Update();
+  }
+  skip_file_cb = &LevelIterator::NextCallback;
+  context.op.scan.args.seen_empty_file = false;
+  SkipEmptyFileForwardAsync(context);
 }
 
 void LevelIterator::NextAsync(AsyncContext& context) {
   assert(Valid());
+  context.op.scan.args.iter_cb = this;
+  context.op.scan.args.iter_seek = false;
+  context.op.scan.args.skip_doing = false;
   file_iter_.NextAsync(context);
+}
+
+void LevelIterator::SkipEmptyFileForwardAsync(AsyncContext& context) {
+  if (file_iter_.iter() == nullptr ||
+      (!file_iter_.Valid() && file_iter_.status().ok()
+          && !file_iter_.iter()->IsOutOfBound())) {
+    context.op.scan.args.seen_empty_file = true;
+    if (file_index_ >= flevel_->num_files - 1) {
+      SetFileIterator(nullptr);
+      return (this->*skip_file_cb)(context);
+    }
+    if (KeyReachedUpperBound(file_smallest_key(file_index_ + 1))) {
+      SetFileIterator(nullptr);
+      return (this->*skip_file_cb)(context);
+    }
+    InitFileIterator(file_index_ + 1);
+    if (file_iter_.iter() != nullptr) {
+      context.op.scan.args.iter_cb = this;
+      context.op.scan.args.iter_seek = true;
+      context.op.scan.args.skip_doing = true;
+      return file_iter_.SeekToFirstAsync(context);
+    }
+  }
+  return (this->*skip_file_cb)(context);
 }
 
 void LevelIterator::Next() { NextImpl(); }
@@ -1212,7 +1283,6 @@ void LevelIterator::InitFileIterator(size_t new_file_index) {
     }
   }
 }
-}  // anonymous namespace
 
 // A wrapper of version builder which references the current version in
 // constructor and unref it in the destructor.
@@ -1630,7 +1700,8 @@ void Version::AddAsyncSupportIteratorsForLevel(AsyncContext& context, const File
         mutable_cf_options_.prefix_extractor.get(), should_sample_file_read(),
         cfd_->internal_stats()->GetFileReadHist(level),
         TableReaderCaller::kUserIterator, IsFilterSkipped(level), level,
-        range_del_agg, /*largest_compaction_key=*/nullptr, &context));
+        range_del_agg, /*largest_compaction_key=*/nullptr,
+        &context, merge_iter_builder->GetMergeIter()));
   }
 }
 

@@ -49,7 +49,7 @@ class SpdkMemoryAllocator : public MemoryAllocator {
       } while (true);
       return buf;
     } else {
-      return spdk_malloc(size, 0, NULL, SPDK_ENV_SOCKET_ID_ANY, SPDK_MALLOC_DMA);
+      return spdk_malloc(size, 0, NULL, options_.socket_id, SPDK_MALLOC_DMA);
     }
   }
 

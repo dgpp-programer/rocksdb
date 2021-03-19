@@ -273,8 +273,6 @@ class BlockBasedTable : public TableReader, public AsyncCallback {
   void RetrieveBlockAsync(AsyncContext &context,
       CachableEntry<TBlocklike>* block_entry, bool use_cache) const;
 
-  void NewDataBlockIteratorAsync(AsyncContext &context) const;
-
   class PartitionedIndexIteratorState;
 
   template <typename TBlocklike>
@@ -756,6 +754,7 @@ class BlockBasedTableIterator : public InternalIteratorBase<TValue>,
   void SeekAsync(AsyncContext& context) override;
   void SeekForPrev(const Slice& target) override;
   void SeekToFirst() override;
+  void SeekToFirstAsync(AsyncContext& context) override;
   void SeekToLast() override;
   void Next() final override;
   void NextAsync(AsyncContext& context) override;

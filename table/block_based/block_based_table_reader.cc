@@ -69,7 +69,7 @@ typedef BlockBasedTable::IndexReader IndexReader;
 
 // Found that 256 KB readahead size provides the best performance, based on
 // experiments, for auto readahead. Experiment data is in PR #3282.
-const size_t BlockBasedTable::kMaxAutoReadaheadSize = 32 * 1024;
+const size_t BlockBasedTable::kMaxAutoReadaheadSize = 256 * 1024;
 
 BlockBasedTable::~BlockBasedTable() {
   delete rep_;
@@ -2181,29 +2181,6 @@ IndexBlockIter* BlockBasedTable::InitBlockIterator<IndexBlockIter>(
       rep->index_value_is_full, block_contents_pinned);
 }
 
-void BlockBasedTable::NewDataBlockIteratorAsync(AsyncContext &context) const {
-  PERF_TIMER_GUARD(new_table_block_iter_nanos);
-  CachableEntry<UncompressionDict> uncompression_dict;
-  if (rep_->uncompression_dict_reader) {
-    const bool no_io = (context.options->read_tier == kBlockCacheTier);
-    // TODO async this
-    context.status = rep_->uncompression_dict_reader->GetOrReadUncompressionDictionary(
-        context.read.prefetch_buffer, no_io, context.read.getCtx.get(),
-    context.read.lookup_context.get(), &uncompression_dict);
-    if (!context.status.ok()) {
-      context.read.data_iter.reset(new DataBlockIter());
-      context.read.data_iter->Invalidate(context.status);
-      return get_rep()->index_reader->NewDataBlockIteratorCallback(context);
-    }
-  }
-
-  context.read.retrieve_block.block.reset(new CachableEntry<Block>());
-  context.read.uncompression_dict = const_cast<UncompressionDict*>(
-      uncompression_dict.GetValue() ? uncompression_dict.GetValue()
-          : &UncompressionDict::GetEmptyDict());
-  RetrieveBlockAsync(context, context.read.retrieve_block.block.get(), true);
-}
-
 // Convert an index iterator value (i.e., an encoded BlockHandle)
 // into an iterator over the contents of the corresponding block.
 // If input_iter is null, new a iterator
@@ -2845,7 +2822,7 @@ void BlockBasedTable::RetrieveBlockDone(AsyncContext& context) {
 template <typename TBlocklike>
 void BlockBasedTable::ReadBlockContentsDone(AsyncContext &ctx_,
     CachableEntry<TBlocklike>*) const {
-  if (ctx_.status.ok()) {
+  if (ctx_.status.ok()) { // 0.5 perf
     std::unique_ptr<TBlocklike> block(
         BlocklikeTraits<TBlocklike>::Create(
             std::move(*ctx_.read.raw_block_contents), rep_->get_global_seqno(ctx_.read.block_type),
@@ -2876,9 +2853,7 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context) const {
     return context.read.async_cb->RetrieveBlockDone(context);
   }
 
-  if (context.read.raw_block_contents) {
-    context.read.raw_block_contents->clear();
-  } else {
+  if (!context.read.raw_block_contents) {
     context.read.raw_block_contents.reset(new BlockContents());
   }
   if (context.read.block_fetcher) {
@@ -2962,9 +2937,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
 
     // Can't find the block from the cache. If I/O is allowed, read from the file.
     if (block_entry->GetValue() == nullptr && !no_io && context.options->fill_cache) {
-      if (context.read.raw_block_contents) {
-        context.read.raw_block_contents->clear();
-      } else {
+      if (!context.read.raw_block_contents) {
         context.read.raw_block_contents.reset(new BlockContents());
       }
       if (!contents) {
@@ -3310,6 +3283,12 @@ void BlockBasedTableIterator<TBlockIter, TValue>::SeekAsync(AsyncContext& contex
 template <class TBlockIter, typename TValue>
 void BlockBasedTableIterator<TBlockIter, TValue>::SeekToFirst() {
   SeekImpl(nullptr);
+}
+
+template <class TBlockIter, typename TValue>
+void BlockBasedTableIterator<TBlockIter, TValue>::SeekToFirstAsync(AsyncContext&) {
+  target_ = nullptr;
+  SeekAsyncImpl();
 }
 
 template <class TBlockIter, typename TValue>

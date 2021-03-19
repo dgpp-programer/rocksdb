@@ -1208,13 +1208,24 @@ void DBIter::SeekDone(AsyncContext&) {
   // we need to find out the next key that is visible to the user.
   //
   ClearSavedValue();
+
+  if (context_->read.key_info.internal_key.empty()) { // seek_to_first operation
+    saved_key_.SetUserKey(ExtractUserKey(iter_.key()),
+        !iter_.iter()->IsKeyPinned() || !pin_thru_lifetime_ /* copy */);
+  }
+
   if (prefix_same_as_start_) {
     // The case where the iterator needs to be invalidated if it has exausted
     // keys within the same prefix of the seek key.
     assert(prefix_extractor_ != nullptr);
     Slice target_prefix;
-    target_prefix = prefix_extractor_->Transform(*context_->op.scan.startKey);
-    FindNextUserEntry(false /* not skipping saved_key */, &target_prefix /* prefix */);
+    if (context_->read.key_info.internal_key.empty()) { // seek_to_first operation
+      target_prefix = prefix_extractor_->Transform(saved_key_.GetUserKey());
+      FindNextUserEntry(false , nullptr);
+    } else {
+      target_prefix = prefix_extractor_->Transform(*context_->op.scan.startKey);
+      FindNextUserEntry(false /* not skipping saved_key */, &target_prefix /* prefix */);
+    }
     if (valid_) {
       // Remember the prefix of the seek key for the future Prev() call to check.
       prefix_.SetUserKey(target_prefix);
@@ -1376,6 +1387,26 @@ void DBIter::SeekForPrev(const Slice& target) {
     RecordTick(statistics_, ITER_BYTES_READ, key().size() + value().size());
     PERF_COUNTER_ADD(iter_read_bytes, key().size() + value().size());
   }
+}
+
+void DBIter::SeekToFirstAsync(AsyncContext& context) {
+  if (iterate_lower_bound_ != nullptr) {
+    context.op.scan.startKey = const_cast<Slice*>(iterate_lower_bound_);
+    return SeekAsync(context);
+  }
+  if (prefix_extractor_ != nullptr && !total_order_seek_) {
+    max_skip_ = std::numeric_limits<uint64_t>::max();
+  }
+  context.status = Status::OK();
+  direction_ = kForward;
+  ReleaseTempPinnedData();
+  ResetInternalKeysSkippedCounter();
+  ClearSavedValue();
+  is_key_seqnum_zero_ = false;
+
+  context.read.key_info.internal_key.clear();
+  context.op.scan.args.merging_iter_cb = this;
+  iter_.SeekToFirstAsync(context);
 }
 
 void DBIter::SeekToFirst() {

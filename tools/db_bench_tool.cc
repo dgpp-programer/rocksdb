@@ -74,6 +74,7 @@
 #include "utilities/merge_operators/bytesxor.h"
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
+#include <execinfo.h>
 
 extern "C" {
 #include "spdk/thread.h"
@@ -5618,8 +5619,6 @@ class Benchmark {
   }
 
   void SeekRandomTest(ThreadState* thread) {
-    int next_count = 0;
-    int complete = 0;
     ReadOptions options(FLAGS_verify_checksum, true);
     options.total_order_seek = FLAGS_total_order_seek;
     options.prefix_same_as_start = FLAGS_prefix_same_as_start;
@@ -5639,7 +5638,8 @@ class Benchmark {
     Slice upper_bound = AllocateKey(&upper_bound_key_guard);
     std::unique_ptr<const char[]> lower_bound_key_guard;
     Slice lower_bound = AllocateKey(&lower_bound_key_guard);
-    int64_t seek_pos = thread->rand.Next() % FLAGS_num;
+    // int64_t seek_pos = thread->rand.Next() % FLAGS_num;
+    int64_t seek_pos = 100; // 9384, 29512, 16452
     GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, &key);
 
     if (FLAGS_max_scan_distance != 0) {
@@ -5655,34 +5655,44 @@ class Benchmark {
       }
     }
 
-    Iterator* iterator = db_with_cfh->db->NewAsyncIterator(*ctx);
-    assert(ctx->status.ok());
-    ctx->op.scan.startKey = const_cast<Slice*>(&key);
-    ctx->op.scan.seek_callback = [&](AsyncContext&) {
-      assert(ctx->status.ok());
-      if (iterator->Valid()) {
-        fprintf(stdout, "key is %s, target key is %s. \n",
-            iterator->key().ToString(true).c_str(), key.ToString(true).c_str());
-        iterator->NextAsync(*ctx);
+    int next_count = 0;
+    int complete = 0;
+    ctx->op.scan.seek_callback = [&](AsyncContext& context) {
+      assert(context.status.ok());
+      if (context.op.scan.iterator->Valid()) {
+//        fprintf(stdout, "key is %s, target key is %s. \n",
+//            iterator->key().ToString(true).c_str(), key.ToString(true).c_str());
+        context.op.scan.iterator->NextAsync(context);
       } else {
         complete++;
         fprintf(stdout, "target key not find.\n");
       }
     };
-    ctx->op.scan.next_callback = [&](AsyncContext&) {
-      assert(ctx->status.ok());
-      if (next_count < FLAGS_seek_nexts && iterator->Valid()) {
+    ctx->op.scan.next_callback = [&](AsyncContext& context) {
+      assert(context.status.ok());
+      if (next_count < FLAGS_seek_nexts && context.op.scan.iterator->Valid()) {
         next_count++;
-        fprintf(stdout, "key is %s, value is %s. \n",
-            iterator->key().ToString(true).c_str(), iterator->value().ToString(true).c_str());
-        iterator->NextAsync(*ctx);
+//        fprintf(stdout, "key is %s, value is %s. \n",
+//            iterator->key().ToString(true).c_str(), iterator->value().ToString(true).c_str());
+        context.op.scan.iterator->NextAsync(context);
       } else {
         complete++;
-        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, ctx->start_time);
+        thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, context.start_time);
       }
     };
+
+//    auto test_iter = db_with_cfh->db->NewIterator(options);
+//    test_iter->Seek(key);
+//    if (test_iter->Valid()) {
+//      fprintf(stdout, "target key find with sync API.\n");
+//    } else {
+//      fprintf(stdout, "target key not find with sync API.\n");
+//    }
+
+    ctx->op.scan.startKey = const_cast<Slice*>(&key);
     ctx->start_time = FLAGS_env->NowMicros();
-    iterator->SeekAsync(*ctx);
+    ctx->op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(*ctx));
+    ctx->op.scan.iterator->SeekAsync(*ctx); // iterator->SeekToFirstAsync(*ctx);
 
     struct spdk_poller *poller;
     struct spdk_thread *spdk_thread = spdk_get_thread();
@@ -5692,7 +5702,6 @@ class Benchmark {
       }
     }
 
-    delete iterator;
     free(ctx);
   }
 
@@ -5743,6 +5752,16 @@ class Benchmark {
           context.op.scan.next_counter = 0;
         } else {
           fprintf(stdout, "target key not find.\n");
+//          void *array[40];
+//          size_t size = backtrace(array, 40);
+//          backtrace_symbols_fd(array, size, STDOUT_FILENO);
+//          auto test_iter = db_with_cfh->db->NewIterator(*context.options);
+//          test_iter->Seek(*context.op.scan.startKey);
+//          if (test_iter->Valid()) {
+//            fprintf(stdout, "target key find with sync API.\n");
+//          } else {
+//            fprintf(stdout, "target key not find with sync API.\n");
+//          }
         }
         return context.op.scan.next_callback(context);
       };

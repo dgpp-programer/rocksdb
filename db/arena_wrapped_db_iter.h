@@ -53,6 +53,7 @@ class ArenaWrappedDBIter : public Iterator {
   virtual void SeekToLast() override { db_iter_->SeekToLast(); }
   virtual void Seek(const Slice& target) override { db_iter_->Seek(target); }
   virtual void SeekAsync(AsyncContext &ctx) override { db_iter_->SeekAsync(ctx); }
+  virtual void SeekToFirstAsync(AsyncContext &ctx) override { db_iter_->SeekToFirstAsync(ctx); }
   virtual void SeekForPrev(const Slice& target) override {
     db_iter_->SeekForPrev(target);
   }

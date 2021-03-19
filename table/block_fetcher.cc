@@ -139,12 +139,7 @@ inline void BlockFetcher::PrepareBufferForBlockFromFile() {
                                     memory_allocator_compressed_);
     used_buf_ = compressed_buf_.get();
   } else {
-    // refer __get_page_parameters to do block alignment
-    uint32_t lba_size = kDefaultPageSize; // TODO chenxu14 consider spdk_bs_get_io_unit_size
-    uint64_t start_lba = handle_.offset() / lba_size;
-    uint64_t end_lba = (handle_.offset() + block_size_ + kBlockTrailerSize - 1) / lba_size;
-    uint64_t num_lba = (end_lba - start_lba + 1);
-    heap_buf_ = AllocateBlock(num_lba * lba_size, memory_allocator_);
+    heap_buf_ = AllocateBlock(block_size_ + kBlockTrailerSize, memory_allocator_);
     used_buf_ = heap_buf_.get();
   }
 }

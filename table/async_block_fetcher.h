@@ -35,7 +35,6 @@ class AsyncBlockFetcher {
     table_ = const_cast<BlockBasedTable*>(table);
     context_ = context;
     slice_.clear();
-    used_buf_ = nullptr;
     heap_buf_.reset();
     got_from_prefetch_buffer_ = false;
   }
@@ -47,7 +46,6 @@ class AsyncBlockFetcher {
   static const uint32_t kDefaultStackBufferSize = 5000;
 
   Slice slice_;
-  char* used_buf_ = nullptr;
   CacheAllocationPtr heap_buf_;
   bool got_from_prefetch_buffer_ = false;
   BlockBasedTable* table_;
@@ -56,8 +54,6 @@ class AsyncBlockFetcher {
   void GetFromPrefetchBufferCallback();
 
   void PrepareBufferForBlockFromFile();
-  // Copy content from used_buf_ to new heap buffer.
-  void CopyBufferToHeap();
   void GetBlockContents();
   void CheckBlockChecksum();
   void ReadBlockContentsDone();

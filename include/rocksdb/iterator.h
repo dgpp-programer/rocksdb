@@ -43,6 +43,9 @@ class Iterator : public Cleanable {
   // Position at the first key in the source.  The iterator is Valid()
   // after this call iff the source is not empty.
   virtual void SeekToFirst() = 0;
+  virtual void SeekToFirstAsync(AsyncContext& context) {
+    context.status = Status::NotSupported("SeekToFirstAsync not supported!");
+  }
 
   // Position at the last key in the source.  The iterator is
   // Valid() after this call iff the source is not empty.

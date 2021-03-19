@@ -566,7 +566,7 @@ bool DataBlockIter::ParseNextDataKey(const char* limit) {
   }
 }
 
-void IndexBlockIter::SeekAsync(AsyncContext& context) {
+void IndexBlockIter::SeekAsync(AsyncContext& context) { // perf 1.01%
   Slice seek_key = context.read.key_info.internal_key;
   if (!key_includes_seq_) {
     seek_key = ExtractUserKey(context.read.key_info.internal_key);

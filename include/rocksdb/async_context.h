@@ -88,8 +88,6 @@ struct ReadContext {
   uint64_t block_offset;
   BlockType block_type;
   FilePrefetchBuffer* prefetch_buffer;
-  bool prefetch_buf_hit;
-  uint64_t chunk_len;
   BlockHandle handle;
   char* cache_key; // TODO when to delete
   char* compressed_cache_key;
@@ -126,6 +124,10 @@ struct ScanContextArgs {
   ReadCallback* read_cb;
   IteratorCallback* iter_cb;
   bool iter_seek;
+  bool skip_doing;
+  bool seen_empty_file;
+  bool prefetch_buf_hit;
+  uint64_t chunk_len;
 };
 
 /**

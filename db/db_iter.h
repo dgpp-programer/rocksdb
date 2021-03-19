@@ -193,6 +193,7 @@ class DBIter final : public Iterator, public IteratorCallback {
   void SeekAsync(AsyncContext& context) final override;
   void SeekForPrev(const Slice& target) final override;
   void SeekToFirst() final override;
+  void SeekToFirstAsync(AsyncContext& context) final override;
   void SeekToLast() final override;
   Env* env() { return env_; }
   void set_sequence(uint64_t s) {

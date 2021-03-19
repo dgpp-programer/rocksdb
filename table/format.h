@@ -215,18 +215,9 @@ struct BlockContents {
     allocation.reset(_data.release());
   }
 
-  void clear() {
-    data.clear();
-    allocation.reset();
-  }
-
-  void reset(const Slice& _data) {
+  void reset(CacheAllocationPtr&& _allocation, const Slice& _data) {
     data = _data;
-  }
-
-  void reset(CacheAllocationPtr&& _data, size_t _size) {
-    data = Slice(_data.get(), _size);
-    allocation = std::move(_data);
+    allocation = std::move(_allocation);
   }
 
   // Returns whether the object has ownership of the underlying data bytes.

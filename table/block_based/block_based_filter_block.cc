@@ -260,7 +260,17 @@ void BlockBasedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
     return t->GetAsyncCallback(context);
   }
 
-  context.read.retrieve_block.contents.reset(new CachableEntry<BlockContents>());
+  if (context.read.retrieve_block.contents) {
+    context.read.retrieve_block.contents->Reset();
+  } else {
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.retrieve_block.contents.reset(new (mem) CachableEntry<BlockContents>());
+      context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+    } else {
+      context.read.retrieve_block.contents.reset(new CachableEntry<BlockContents>());
+    }
+  }
   if (!filter_block_.IsEmpty()) {
     context.read.retrieve_block.contents->SetUnownedValue(filter_block_.GetValue());
     context.status = Status::OK();

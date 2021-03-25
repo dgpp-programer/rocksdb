@@ -1987,7 +1987,13 @@ void Version::GetAsync(AsyncContext& context) {
   if (context.op.get.args.pinned_iters_mgr) {
     context.op.get.args.pinned_iters_mgr->reset();
   } else {
-    context.op.get.args.pinned_iters_mgr.reset(new PinnedIteratorsManager());
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(PinnedIteratorsManager)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.op.get.args.pinned_iters_mgr.reset(new (mem) PinnedIteratorsManager());
+      context.read.ctx_offset += sizeof(PinnedIteratorsManager);
+    } else {
+      context.op.get.args.pinned_iters_mgr.reset(new PinnedIteratorsManager());
+    }
   }
   if (context.read.getCtx) {
     context.read.getCtx->reset(
@@ -1998,13 +2004,25 @@ void Version::GetAsync(AsyncContext& context) {
         merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
         BlockCacheTraceHelper::kReservedGetId);
   } else {
-    context.read.getCtx.reset(new GetContext(
-        user_comparator(), merge_operator_, info_log_, db_statistics_,
-        context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
-        context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
-        &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
-        merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
-        BlockCacheTraceHelper::kReservedGetId));
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(GetContext)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.getCtx.reset(new (mem) GetContext(
+          user_comparator(), merge_operator_, info_log_, db_statistics_,
+          context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
+          context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
+          &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
+          merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
+          BlockCacheTraceHelper::kReservedGetId));
+      context.read.ctx_offset += sizeof(GetContext);
+    } else {
+      context.read.getCtx.reset(new GetContext(
+          user_comparator(), merge_operator_, info_log_, db_statistics_,
+          context.status.ok() ? GetContext::kNotFound : GetContext::kMerge, context.read.key_info.user_key,
+          context.op.get.value, nullptr, context.op.get.args.merge_context.get(), true,
+          &context.op.get.args.max_covering_tombstone_seq, this->env_, nullptr,
+          merge_operator_ ? context.op.get.args.pinned_iters_mgr.get() : nullptr, nullptr, nullptr,
+          BlockCacheTraceHelper::kReservedGetId));
+    }
   }
   if (merge_operator_) {
     context.op.get.args.pinned_iters_mgr->StartPinning();
@@ -2015,10 +2033,19 @@ void Version::GetAsync(AsyncContext& context) {
         &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
         user_comparator(), internal_comparator());
   } else {
-    context.op.get.args.fp.reset(new FilePicker(
-        storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
-        &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
-        user_comparator(), internal_comparator()));
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(FilePicker)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.op.get.args.fp.reset(new (mem) FilePicker(
+          storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
+          &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
+          user_comparator(), internal_comparator()));
+      context.read.ctx_offset += sizeof(FilePicker);
+    } else {
+      context.op.get.args.fp.reset(new FilePicker(
+          storage_info_.files_, context.read.key_info.user_key, context.read.key_info.internal_key,
+          &storage_info_.level_files_brief_, storage_info_.num_non_empty_levels_, &storage_info_.file_indexer_,
+          user_comparator(), internal_comparator()));
+    }
   }
 
   IterateNextFile(context);

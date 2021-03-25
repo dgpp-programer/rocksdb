@@ -4910,7 +4910,10 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
-    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(1, sizeof(struct AsyncContext)));
+    size_t kContextBufferSize = 1536;
+    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(
+        calloc(1, sizeof(struct AsyncContext) + kContextBufferSize));
+    ctx->read.ctx_buffer_size = kContextBufferSize;
     if (!ctx) {
       return;
     }
@@ -4957,31 +4960,34 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
-    // PinnableSlice pinnable_val;
     Duration duration(FLAGS_duration, reads_);
 
     int64_t summit = 0;
     int64_t complete = 0;
 
-    // TODO allocate AsyncContext from DB
-    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(parallel, sizeof(struct AsyncContext)));
-    if (!ctx) {
-      return;
+    struct AsyncContext* ctx[parallel];
+    size_t kContextBufferSize = 1536;
+    for (int i = 0; i < parallel; i++) {
+      void* context = calloc(1, sizeof(struct AsyncContext) + kContextBufferSize);
+      if (!context) {
+        return;
+      }
+      ctx[i] = reinterpret_cast<AsyncContext*>(context);
     }
-    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
 
+    DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
     for (int i = 0; i < parallel; i++) {
       PinnableSlice pinnable_val;
-      ctx[i].options = &options;
-      ctx[i].cf = db_with_cfh->db->DefaultColumnFamily();
-      ctx[i].op.get.value = &pinnable_val;
-      ctx[i].op.get.callback = [&](AsyncContext& context) {
+      ctx[i]->read.ctx_buffer_size = kContextBufferSize;
+      ctx[i]->options = &options;
+      ctx[i]->cf = db_with_cfh->db->DefaultColumnFamily();
+      ctx[i]->op.get.value = &pinnable_val;
+      ctx[i]->op.get.callback = [&](AsyncContext& context) {
         if (!context.status.ok()) {
           fprintf(stderr, "Get returned an error: %s\n", context.status.ToString().c_str());
         } else {
           found++;
           bytes += context.op.get.key->size() + context.op.get.value->size();
-          // fprintf(stdout, "total read bytes : %ld, current key is %s. \n", bytes, context.op.get.key->ToString(true).c_str());
         }
         context.op.get.value->Reset();
         thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kRead, context.start_time);
@@ -4998,9 +5004,9 @@ class Benchmark {
 
       GenerateKeyFromInt(key_rand, FLAGS_num, &key);
       key_rand = GetRandomKey(&thread->rand);
-      ctx[i].op.get.key = &key;
-      ctx[i].start_time = FLAGS_env->NowMicros();
-      db_with_cfh->db->GetAsync(ctx[i]);
+      ctx[i]->op.get.key = &key;
+      ctx[i]->start_time = FLAGS_env->NowMicros();
+      db_with_cfh->db->GetAsync(*ctx[i]);
       summit++;
     }
 
@@ -5021,7 +5027,9 @@ class Benchmark {
       thread->stats.AddMessage(std::string("PERF_CONTEXT:\n") + get_perf_context()->ToString());
     }
 
-    free(ctx); // TODO reclaim AsyncContext
+    for (int i = 0; i < parallel; i++) {
+      free(ctx[i]);
+    }
   }
 
   void ReadRandom(ThreadState* thread) {
@@ -5625,8 +5633,10 @@ class Benchmark {
     options.tailing = FLAGS_use_tailing_iterator;
     options.readahead_size = FLAGS_readahead_size;
 
+    size_t kContextBufferSize = 512;
     struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(
-        calloc(1, sizeof(struct AsyncContext)));
+        calloc(1, sizeof(struct AsyncContext) + kContextBufferSize));
+    ctx->read.ctx_buffer_size = kContextBufferSize;
     ctx->options = &options;
 
     DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
@@ -5715,7 +5725,16 @@ class Benchmark {
     std::vector<ReadOptions> options(parallel);
     std::vector<Slice> keys(parallel);
 
+
+    struct AsyncContext* ctx[parallel];
+    size_t kContextBufferSize = 512;
     for (int i = 0; i < parallel; i++) {
+      void* context = calloc(1, sizeof(struct AsyncContext) + kContextBufferSize);
+      if (!context) {
+        return;
+      }
+      ctx[i] = reinterpret_cast<AsyncContext*>(context);
+
       ReadOptions option(FLAGS_verify_checksum, true);
       option.total_order_seek = FLAGS_total_order_seek;
       option.prefix_same_as_start = FLAGS_prefix_same_as_start;
@@ -5733,23 +5752,22 @@ class Benchmark {
     Duration duration(FLAGS_duration, reads_);
     char value_buffer[256];
 
-    struct AsyncContext *ctx = reinterpret_cast<AsyncContext*>(calloc(parallel, sizeof(struct AsyncContext)));
-
     for (int i = 0; i < parallel; i++) {
-      ctx[i].options = &options[i];
-      ctx[i].cf = db_with_cfh->db->DefaultColumnFamily();
-      ctx[i].op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(ctx[i]));
-      assert(ctx[i].op.scan.iterator->status().ok());
+      ctx[i]->read.ctx_buffer_size = kContextBufferSize;
+      ctx[i]->options = &options[i];
+      ctx[i]->cf = db_with_cfh->db->DefaultColumnFamily();
+      ctx[i]->op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(*ctx[i]));
+      assert(ctx[i]->op.scan.iterator->status().ok());
 
-      ctx[i].op.scan.startKey = &keys[i];
+      ctx[i]->op.scan.startKey = &keys[i];
       int64_t seek_pos = thread->rand.Next() % FLAGS_num;
-      GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, ctx[i].op.scan.startKey);
+      GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num, ctx[i]->op.scan.startKey);
 
-      ctx[i].op.scan.seek_callback = [&](AsyncContext& context) {
+      ctx[i]->op.scan.seek_callback = [&](AsyncContext& context) {
         bool end = !context.op.scan.iterator->Valid();
         if (!end) {
           found++;
-          context.op.scan.next_counter = 0;
+          context.op.scan.args.next_counter = 0;
         } else {
           fprintf(stdout, "target key not find.\n");
 //          void *array[40];
@@ -5766,27 +5784,27 @@ class Benchmark {
         return context.op.scan.next_callback(context);
       };
 
-      ctx[i].op.scan.next_callback = [&](AsyncContext& context) {
-        if (context.op.scan.next_doing) { // cache hit case
-          context.op.scan.next_doing = false;
+      ctx[i]->op.scan.next_callback = [&](AsyncContext& context) {
+        if (context.op.scan.args.next_doing) { // cache hit case
+          context.op.scan.args.next_doing = false;
           bytes += (context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size());
           return;
         }
-        context.op.scan.next_counter++;
+        context.op.scan.args.next_counter++;
         bool end = !context.op.scan.iterator->Valid();
         if (!end) {
           Slice value = context.op.scan.iterator->value();
           memcpy(value_buffer, value.data(), std::min(value.size(), sizeof(value_buffer)));
           bytes += (context.op.scan.iterator->key().size() + context.op.scan.iterator->value().size());
-          while (context.op.scan.next_counter < FLAGS_seek_nexts) {
-            context.op.scan.next_doing = true;
+          while (context.op.scan.args.next_counter < FLAGS_seek_nexts) {
+            context.op.scan.args.next_doing = true;
             context.op.scan.iterator->NextAsync(context);
-            if (context.op.scan.next_doing) { // no cache hit
-              context.op.scan.next_doing = false; // break current next_callback
+            if (context.op.scan.args.next_doing) { // no cache hit
+              context.op.scan.args.next_doing = false; // break current next_callback
               return; // Jump out of next_callback, prevent stack from being too large
             } else { // cache hit case
               if (context.op.scan.iterator->Valid()) {
-                context.op.scan.next_counter++;
+                context.op.scan.args.next_counter++;
               } else {
                 break;
               }
@@ -5796,7 +5814,7 @@ class Benchmark {
         }
         if (end) {
           complete++;
-          thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, ctx->start_time);
+          thread->stats.FinishedOps(db_with_cfh, db_with_cfh->db, 1, kSeek, context.start_time);
           if (!duration.Done(1)) {
             // resubmit until time over
             context.op.scan.iterator.reset(db_with_cfh->db->NewAsyncIterator(context));
@@ -5810,9 +5828,9 @@ class Benchmark {
         }
       };
 
-      ctx[i].start_time = FLAGS_env->NowMicros();
+      ctx[i]->start_time = FLAGS_env->NowMicros();
       read++;
-      ctx[i].op.scan.iterator->SeekAsync(ctx[i]);
+      ctx[i]->op.scan.iterator->SeekAsync(*ctx[i]);
     }
 
     struct spdk_poller *poller;
@@ -5831,9 +5849,9 @@ class Benchmark {
       thread->stats.AddMessage(std::string("PERF_CONTEXT:\n") + get_perf_context()->ToString());
     }
 
-    free(ctx);
     for (int i = 0; i < parallel; i++) {
       delete keys[i].data();
+      free(ctx[i]);
     }
   }
 

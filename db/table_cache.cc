@@ -211,7 +211,13 @@ InternalIterator* TableCache::NewIterator(
         if (context->read.lookup_context) {
           context->read.lookup_context->reset(caller);
         } else {
-          context->read.lookup_context.reset(new BlockCacheLookupContext(caller));
+          if (context->read.ctx_buffer_size - context->read.ctx_offset > sizeof(BlockCacheLookupContext)) {
+            auto mem = (uint8_t *)context + sizeof(AsyncContext) + context->read.ctx_offset;
+            context->read.lookup_context.reset(new (mem) BlockCacheLookupContext(caller));
+            context->read.ctx_offset += sizeof(BlockCacheLookupContext);
+          } else {
+            context->read.lookup_context.reset(new BlockCacheLookupContext(caller));
+          }
         }
         result = table_reader->NewAsyncIterator(context, prefix_extractor, arena,
             skip_filters, file_options.compaction_readahead_size);

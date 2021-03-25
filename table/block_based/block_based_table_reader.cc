@@ -264,7 +264,17 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
   InternalIteratorBase<IndexValue>* NewLazyInitIndexIterator(
       AsyncContext& context) override {
     if (!index_block_.IsEmpty()) { // TODO chenxu14 UT test this
-      context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+      if (context.read.retrieve_block.block) {
+        context.read.retrieve_block.block->Reset();
+      } else {
+        if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+          auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+          context.read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+          context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+        } else {
+          context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+        }
+      }
       context.read.retrieve_block.block->SetUnownedValue(index_block_.GetValue());
       context.status = Status::OK();
       context.read.skip_seek = true;
@@ -279,7 +289,17 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
    * and context.read.index_iter_cb
    */
   void NewAsyncIndexIterator(AsyncContext &context) override {
-    context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+    if (context.read.retrieve_block.block) {
+      context.read.retrieve_block.block->Reset();
+    } else {
+      if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+        auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+        context.read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+        context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+      } else {
+        context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+      }
+    }
     if (!index_block_.IsEmpty()) { // TODO chenxu14 test cache not find
       context.read.retrieve_block.block->SetUnownedValue(index_block_.GetValue());
       context.status = Status::OK();
@@ -448,7 +468,17 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
       }
     }
 
-    context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+    if (context.read.retrieve_block.block) {
+      context.read.retrieve_block.block->Reset();
+    } else {
+      if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+        auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+        context.read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+        context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+      } else {
+        context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+      }
+    }
     context.read.handle = v.handle;
     context.read.block_type = BlockType::kData;
     context.read.prefetch_buffer = nullptr;
@@ -459,9 +489,17 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
           context.read.getCtx->get_tracing_get_id(),
           /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr);
     } else {
-      context.read.lookup_context.reset(new BlockCacheLookupContext(
-          TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
-          /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+      if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(BlockCacheLookupContext)) {
+        auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+        context.read.lookup_context.reset(new (mem) BlockCacheLookupContext(
+            TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+            /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+        context.read.ctx_offset += sizeof(BlockCacheLookupContext);
+      } else {
+        context.read.lookup_context.reset(new BlockCacheLookupContext(
+            TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+            /*get_from_user_specified_snapshot=*/context.options->snapshot != nullptr));
+      }
     }
     context.read.uncompression_dict = const_cast<UncompressionDict*>(
         uncompression_dict.GetValue() ? uncompression_dict.GetValue()
@@ -2778,7 +2816,13 @@ void BlockBasedTable::RetrieveBlockDone(AsyncContext& context) {
   if (context.read.data_iter) {
     context.read.data_iter->clearup();
   } else {
-    context.read.data_iter.reset(new DataBlockIter());
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(DataBlockIter)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.data_iter.reset(new (mem) DataBlockIter());
+      context.read.ctx_offset += sizeof(DataBlockIter);
+    } else {
+      context.read.data_iter.reset(new DataBlockIter());
+    }
   }
   block->GetValue()->NewDataIterator(
       &rep_->internal_comparator, rep_->internal_comparator.user_comparator(),
@@ -2854,12 +2898,24 @@ void BlockBasedTable::RetrieveBlockCallback(AsyncContext &context) const {
   }
 
   if (!context.read.raw_block_contents) {
-    context.read.raw_block_contents.reset(new BlockContents());
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(BlockContents)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.raw_block_contents.reset(new (mem) BlockContents());
+      context.read.ctx_offset += sizeof(BlockContents);
+    } else {
+      context.read.raw_block_contents.reset(new BlockContents());
+    }
   }
   if (context.read.block_fetcher) {
     context.read.block_fetcher->reset(this, &context);
   } else {
-    context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(AsyncBlockFetcher)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.block_fetcher.reset(new (mem) AsyncBlockFetcher(this, &context));
+      context.read.ctx_offset += sizeof(AsyncBlockFetcher);
+    } else {
+      context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+    }
   }
   context.read.read_contents_no_cache = true;
   context.read.block_fetcher->ReadBlockContentsAsync();
@@ -2938,13 +2994,25 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
     // Can't find the block from the cache. If I/O is allowed, read from the file.
     if (block_entry->GetValue() == nullptr && !no_io && context.options->fill_cache) {
       if (!context.read.raw_block_contents) {
-        context.read.raw_block_contents.reset(new BlockContents());
+        if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(BlockContents)) {
+          auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+          context.read.raw_block_contents.reset(new (mem) BlockContents());
+          context.read.ctx_offset += sizeof(BlockContents);
+        } else {
+          context.read.raw_block_contents.reset(new BlockContents());
+        }
       }
       if (!contents) {
         if (context.read.block_fetcher) {
           context.read.block_fetcher->reset(this, &context);
         } else {
-          context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+          if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(AsyncBlockFetcher)) {
+            auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+            context.read.block_fetcher.reset(new (mem) AsyncBlockFetcher(this, &context));
+            context.read.ctx_offset += sizeof(AsyncBlockFetcher);
+          } else {
+            context.read.block_fetcher.reset(new AsyncBlockFetcher(this, &context));
+          }
         }
         context.read.read_contents_no_cache = false;
         return context.read.block_fetcher->ReadBlockContentsAsync();
@@ -3124,7 +3192,17 @@ void IndexBlockLazyInitIter::InitInnerIter(AsyncContext& context) {
   if (inner_iter_ == nullptr) {
     const BlockBasedTable::Rep* const rep = table_->get_rep();
     assert(rep != nullptr);
-    context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+    if (context.read.retrieve_block.block) {
+      context.read.retrieve_block.block->Reset();
+    } else {
+      if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+        auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+        context.read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+        context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+      } else {
+        context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+      }
+    }
     context.read.async_cb = this;
     context.read.block_type = BlockType::kIndex;
     context.read.prefetch_buffer = nullptr;
@@ -3721,7 +3799,17 @@ void BlockBasedTableIterator<TBlockIter, TValue>::InitDataBlockAsync() {
       }
     }
 
-    context_->read.retrieve_block.block.reset(new CachableEntry<Block>());
+    if (context_->read.retrieve_block.block) {
+      context_->read.retrieve_block.block->Reset();
+    } else {
+      if (context_->read.ctx_buffer_size - context_->read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+        auto mem = (uint8_t *)context_ + sizeof(AsyncContext) + context_->read.ctx_offset;
+        context_->read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+        context_->read.ctx_offset += sizeof(CachableEntry<Generic>);
+      } else {
+        context_->read.retrieve_block.block.reset(new CachableEntry<Block>());
+      }
+    }
     context_->read.handle = data_block_handle;
     context_->read.block_type = block_type_;
     context_->read.prefetch_buffer = prefetch_buffer_.get();
@@ -4170,9 +4258,17 @@ void BlockBasedTable::GetAsync(AsyncContext& context) {
     context.read.lookup_context->reset(TableReaderCaller::kUserGet,
         context.read.getCtx->get_tracing_get_id(), context.options->snapshot != nullptr);
   } else {
-    context.read.lookup_context.reset(new BlockCacheLookupContext (
-        TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
-        context.options->snapshot != nullptr));
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(BlockCacheLookupContext)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.lookup_context.reset(new (mem) BlockCacheLookupContext(
+          TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+          context.options->snapshot != nullptr));
+      context.read.ctx_offset += sizeof(BlockCacheLookupContext);
+    } else {
+      context.read.lookup_context.reset(new BlockCacheLookupContext (
+          TableReaderCaller::kUserGet, context.read.getCtx->get_tracing_get_id(),
+          context.options->snapshot != nullptr));
+    }
   }
   if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
     context.read.lookup_context->referenced_key =

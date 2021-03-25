@@ -1573,13 +1573,25 @@ void DBImpl::GetAsync(AsyncContext& context) {
   if (context.op.get.args.merge_context) {
     context.op.get.args.merge_context->reset();
   } else {
-    context.op.get.args.merge_context.reset(new MergeContext());
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(MergeContext)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.op.get.args.merge_context.reset(new (mem) MergeContext());
+      context.read.ctx_offset += sizeof(MergeContext);
+    } else {
+      context.op.get.args.merge_context.reset(new MergeContext());
+    }
   }
   context.op.get.args.max_covering_tombstone_seq = 0;
   if (context.read.key_info.lkey) {
     context.read.key_info.lkey->reset(*context.op.get.key, snapshot, read_options->timestamp);
   } else {
-    context.read.key_info.lkey.reset(new LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(LookupKey)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.key_info.lkey.reset(new (mem) LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+      context.read.ctx_offset += sizeof(LookupKey);
+    } else {
+      context.read.key_info.lkey.reset(new LookupKey(*context.op.get.key, snapshot, read_options->timestamp));
+    }
   }
   context.read.key_info.internal_key = context.read.key_info.lkey->internal_key();
   context.read.key_info.user_key = context.read.key_info.lkey->user_key();

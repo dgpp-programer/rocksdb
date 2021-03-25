@@ -206,10 +206,17 @@ void PartitionedFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
     return t->GetAsyncCallback(context);
   }
 
-  auto entry = context.read.retrieve_block.block.release();
-  delete entry; // TODO chenxu14 should we cache move it to filter_block_?
-
-  context.read.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+  if (context.read.retrieve_block.full_filter_block) {
+    context.read.retrieve_block.full_filter_block->Reset();
+  } else {
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.retrieve_block.full_filter_block.reset(new (mem) CachableEntry<ParsedFullFilterBlock>());
+      context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+    } else {
+      context.read.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+    }
+  }
   if (!filter_map_.empty()) { // TODO chenxu14 test
     auto iter = filter_map_.find(filter_handle.offset());
     if (iter != filter_map_.end()) {
@@ -238,7 +245,17 @@ void PartitionedFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
     return t->GetAsyncCallback(context);
   }
 
-  context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+  if (context.read.retrieve_block.block) {
+    context.read.retrieve_block.block->Reset();
+  } else {
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.retrieve_block.block.reset(new (mem) CachableEntry<Block>());
+      context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+    } else {
+      context.read.retrieve_block.block.reset(new CachableEntry<Block>());
+    }
+  }
   if (!filter_block_.IsEmpty()) { // TODO chenxu14 test cache not hit
     context.read.retrieve_block.block->SetUnownedValue(filter_block_.GetValue());
     context.status = Status::OK();

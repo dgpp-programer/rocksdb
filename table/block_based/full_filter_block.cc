@@ -129,8 +129,7 @@ void FullFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
     // remain the same with block_based filter
     context.read.key_may_match = true;
   }
-  auto entry = context.read.retrieve_block.full_filter_block.release();
-  delete entry;
+  context.read.retrieve_block.full_filter_block->Reset();
   t->GetAsyncCallback(context);
 }
 
@@ -142,7 +141,17 @@ void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
     return t->GetAsyncCallback(context);
   }
 
-  context.read.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+  if (context.read.retrieve_block.full_filter_block) {
+    context.read.retrieve_block.full_filter_block->Reset();
+  } else {
+    if (context.read.ctx_buffer_size - context.read.ctx_offset > sizeof(CachableEntry<Generic>)) {
+      auto mem = (uint8_t *)&context + sizeof(AsyncContext) + context.read.ctx_offset;
+      context.read.retrieve_block.full_filter_block.reset(new (mem) CachableEntry<ParsedFullFilterBlock>());
+      context.read.ctx_offset += sizeof(CachableEntry<Generic>);
+    } else {
+      context.read.retrieve_block.full_filter_block.reset(new CachableEntry<ParsedFullFilterBlock>());
+    }
+  }
   if (!filter_block_.IsEmpty()) { // TODO chenxu14 test cache not find
     context.read.retrieve_block.full_filter_block->SetUnownedValue(filter_block_.GetValue());
     context.status = Status::OK();

@@ -60,7 +60,6 @@ public:
 typedef void (AsyncBlockFetcher::*read_complete_cb)();
 
 // TODO make sure all pointer refer to no function variable
-
 struct ReadContext {
   // used by RetrieveBlockAsync
   uint64_t offset;
@@ -72,42 +71,46 @@ struct ReadContext {
   DBImpl* db_impl;
   ColumnFamilyData *cfd;
   SuperVersion* sv;
-  // TODO chenxu14 use continuous memory
-  std::unique_ptr<GetContext> getCtx;
-  struct {
-    std::unique_ptr<LookupKey> lkey;
-    Slice internal_key;
-    Slice user_key;
-  } key_info;
-  bool key_may_match;
-  bool skip_filters;
-  bool skip_seek; // when build iterator, no need to do index seek
-  bool for_compaction;
-  bool read_contents_no_cache;
-  bool second_level; // used by PartitionedFilterBlockReader
-  uint64_t block_offset;
-  BlockType block_type;
-  FilePrefetchBuffer* prefetch_buffer;
-  BlockHandle handle;
-  char* cache_key; // TODO when to delete
-  char* compressed_cache_key;
-  Slice key;
-  Slice ckey;
-  UncompressionDict* uncompression_dict;
-  std::unique_ptr<BlockCacheLookupContext> lookup_context;
-  std::unique_ptr<AsyncBlockFetcher> block_fetcher;
-  std::unique_ptr<BlockContents> raw_block_contents;
   AsyncCallback* async_cb;
   IteratorCallback* index_iter_cb;
-  bool index_iter_seek;
+
+  std::unique_ptr<AsyncBlockFetcher> block_fetcher;
+  std::unique_ptr<BlockContents> raw_block_contents;
+  std::unique_ptr<BlockCacheLookupContext> lookup_context;
   union {
     std::unique_ptr<CachableEntry<Generic>> cache_entry;
     std::unique_ptr<CachableEntry<BlockContents>> contents;
     std::unique_ptr<CachableEntry<Block>> block;
     std::unique_ptr<CachableEntry<ParsedFullFilterBlock>> full_filter_block;
   } retrieve_block;
-  std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
+  std::unique_ptr<GetContext> getCtx;
   std::unique_ptr<DataBlockIter> data_iter;
+  std::unique_ptr<InternalIteratorBase<IndexValue>> index_iter;
+
+  bool index_iter_seek;
+  bool key_may_match;
+  bool skip_filters;
+  bool skip_seek; // when build iterator, no need to do index seek
+  bool for_compaction;
+  bool read_contents_no_cache;
+  bool second_level; // used by PartitionedFilterBlockReader
+  struct {
+    std::unique_ptr<LookupKey> lkey;
+    Slice internal_key;
+    Slice user_key;
+  } key_info;
+  uint64_t block_offset;
+  BlockType block_type;
+  FilePrefetchBuffer* prefetch_buffer;
+  BlockHandle handle;
+  UncompressionDict* uncompression_dict;
+  Slice key;
+  Slice ckey;
+  char* cache_key; // TODO when to delete
+  char* compressed_cache_key;
+  // use continuous memory to improve cache line utilization
+  size_t ctx_buffer_size = 0;
+  size_t ctx_offset = 0;
 };
 
 struct GetContextArgs {
@@ -127,7 +130,9 @@ struct ScanContextArgs {
   bool skip_doing;
   bool seen_empty_file;
   bool prefetch_buf_hit;
+  bool next_doing;
   uint64_t chunk_len;
+  int32_t next_counter;
 };
 
 /**
@@ -140,7 +145,8 @@ struct AsyncContext {
   ReadOptions* options;
   Status status;
   struct ReadContext read;
-  struct {
+  // [NOTICE] chenxu14 Get and Scan should be run in different thread
+  union {
     struct {
       Slice* key;
       PinnableSlice* value;
@@ -148,12 +154,10 @@ struct AsyncContext {
       struct GetContextArgs args;
     } get;
     struct {
-      Slice* startKey; // TODO chenxu14 change to Slice
+      Slice* startKey; // TODO chenxu14 consider change to Slice
       std::unique_ptr<Iterator> iterator;
       std::function<void(AsyncContext&)> seek_callback;
       std::function<void(AsyncContext&)> next_callback;
-      int32_t next_counter;
-      bool next_doing;
       struct ScanContextArgs args;
     } scan;
   } op;

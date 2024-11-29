@@ -1922,6 +1922,7 @@ void Version::GetAsyncCallback(AsyncContext& context) {
 }
 
 void Version::IterateNextFile(AsyncContext& context) {
+  //这里就是选取下一个sst文件，选取逻辑是L0是顺序遍历SST文件，其他Level按照二分的逻辑选取下一个合适的SST文件
   FdWithKeyRange* f = context.op.get.args.fp->GetNextFile();
   if (f == nullptr || context.op.get.args.max_covering_tombstone_seq > 0) {
     GetAsyncCallback(context);
@@ -2377,6 +2378,8 @@ void Version::MultiGet(const ReadOptions& read_options, MultiGetRange* range,
 bool Version::IsFilterSkipped(int level, bool is_file_last_in_level) {
   // Reaching the bottom level implies misses at all upper levels, so we'll
   // skip checking the filters when we predict a hit.
+  //optimize_filters_for_hits默认为false，如果你认为肯定能在数据库中能读到数据，打开此选项时，
+  //如果读落到了最底层，那么就不会构建布隆过滤器，减少内存消耗，但对于读不到的场景会增加IO
   return cfd_->ioptions()->optimize_filters_for_hits &&
          (level > 0 || is_file_last_in_level) &&
          level == storage_info_.num_non_empty_levels() - 1;

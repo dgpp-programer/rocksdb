@@ -370,6 +370,7 @@ void TableCache::GetAsyncCallback(AsyncContext& context) {
   if (context.op.get.args.cache_handle != nullptr) {
     ReleaseHandle(context.op.get.args.cache_handle);
   }
+  //结束当前sst文件的读操作，根据读取结果，将会进入下一个sst文件读或结束读
   context.read.sv->current->GetAsyncDone(context);
 }
 

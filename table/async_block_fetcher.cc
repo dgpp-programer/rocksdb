@@ -96,16 +96,20 @@ inline void AsyncBlockFetcher::GetBlockContents() {
 }
 
 void AsyncBlockFetcher::ReadBlockContentsDone() {
+  //对于第一次读，需要去文件读布隆过滤器，所以这里block_type为kFilter，且fileter为kFullFilter，read_contents_no_cache为false
   if (context_->read.block_type == BlockType::kFilter) {
     if (context_->read.second_level
         || table_->get_rep()->filter_type == BlockBasedTable::Rep::FilterType::kFullFilter) {
-      CachableEntry<ParsedFullFilterBlock> *block;
+      CachableEntry<ParsedFullFilterBlock> *block = nullptr;
+      //这里就是根据 read_contents_no_cache 判断缓存读的数据是否在缓存中存在，存在就直接走ReadBlockContentsDone
+      //不存在就走 ReadBlockContentsCallback，先将数据丢到缓存，然后走缓存读到的逻辑回调
+      //最终都是走 FullFilterBlockReader::RetrieveBlockDone进入到下一步读index环节
       return context_->read.read_contents_no_cache
           ? table_->ReadBlockContentsDone(*context_, block)
           : table_->ReadBlockContentsCallback(*context_, block);
     }
   }
-  CachableEntry<Block> *block;
+  CachableEntry<Block> *block = nullptr;
   return context_->read.read_contents_no_cache
       ? table_->ReadBlockContentsDone(*context_, block)
       : table_->ReadBlockContentsCallback(*context_, block);
@@ -154,6 +158,7 @@ void AsyncBlockFetcher::ReadBlockContentsCallback() {
 }
 
 void AsyncBlockFetcher::GetFromPrefetchBufferCallback() {
+  // got_from_prefetch_buffer_初始化为false
   if (got_from_prefetch_buffer_) {
     if (!context_->status.ok()) {
       return ReadBlockContentsDone();
@@ -166,12 +171,15 @@ void AsyncBlockFetcher::GetFromPrefetchBufferCallback() {
     context_->read.length = context_->read.handle.size() + kBlockTrailerSize;
     context_->read.result = &slice_;
     context_->read.scratch = heap_buf_.get();
+    //设置异步读回调函数
     context_->read.read_complete = &AsyncBlockFetcher::ReadBlockContentsCallback;
+    //这里取异步读数据
     return table_->get_rep()->file->ReadAsync(*context_);
   }
 }
 
 void AsyncBlockFetcher::ReadBlockContentsAsync() {
+  //第一次的时候 prefetch_buffer为nullptr
   if (context_->read.prefetch_buffer != nullptr) {
     context_->read.offset = context_->read.handle.offset();
     context_->read.length = context_->read.handle.size() + kBlockTrailerSize;

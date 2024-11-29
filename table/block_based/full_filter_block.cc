@@ -132,9 +132,10 @@ void FullFilterBlockReader::RetrieveBlockDone(AsyncContext &context) {
   context.read.retrieve_block.full_filter_block->Reset();
   t->GetAsyncCallback(context);
 }
-
+//第一次读，先通过布隆过滤器判断key是否在该sst文件中
 void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   assert(context.read.block_offset == kNotValid);
+  //进不去if
   if (!whole_key_filtering()) {
     context.read.key_may_match = true;
     auto t = const_cast<BlockBasedTable*>(table());
@@ -162,6 +163,7 @@ void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
   const BlockBasedTable::Rep* const rep = table_->get_rep();
   assert(rep);
 
+  //注意这里将this设置给了async_cb，那么当在BlockBasedTable里面使用async_cb回调的时候，会进入到本类的回调里面
   context.read.async_cb = this;
   context.read.block_type = BlockType::kFilter;
   context.read.prefetch_buffer = nullptr;
@@ -170,7 +172,7 @@ void FullFilterBlockReader::KeyMayMatchAsync(AsyncContext &context) {
       &UncompressionDict::GetEmptyDict());
   context.read.for_compaction = false;
   table_->RetrieveBlockAsync(context, context.read.retrieve_block.full_filter_block.get(),
-      cache_filter_blocks());
+      cache_filter_blocks()/*true*/);
 }
 
 bool FullFilterBlockReader::KeyMayMatch(

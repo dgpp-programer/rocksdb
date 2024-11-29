@@ -341,6 +341,8 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
           context.status = Status::Corruption(Slice());
         }
         bool matched = false;  // if such user key mathced a key in SST
+        //如果找到了完整的value，就会返回false，进入if，
+        //如果没找到就返回true，继续迭代（语义确实有点奇怪，但逻辑确实是这样）
         if (!context.read.getCtx->SaveValue(parsed_key, context.read.data_iter->value(), &matched,
             context.read.data_iter->IsValuePinned() ? context.read.data_iter.get() : nullptr)) {
           auto filter = !context.read.skip_filters ? rep_t->filter.get() : nullptr;
@@ -353,10 +355,16 @@ class BlockBasedTable::IndexReaderCommon : public BlockBasedTable::IndexReader {
       }
       context.status = context.read.index_iter->status();
     }
-
+    //记住这里赋值了 index_iter_cb ，在后面 IndexBlockIter 的 NextAsync会使用
     context.read.index_iter_cb = this;
     context.read.index_iter_seek = false;
     context.read.index_iter->NextAsync(context);
+    //调用栈：
+      /* IndexBlockIter::NextAsync
+         IndexBlockIter::Next
+         BlockBasedTable::IndexReaderCommon::NextDone (继承的基类)
+         BlockBasedTable::IndexReaderCommon::SeekDone
+      */
   }
 
   void SeekDone(AsyncContext& context) {
@@ -828,6 +836,8 @@ class BinarySearchIndexReader : public BlockBasedTable::IndexReaderCommon {
       context.read.retrieve_block.block->TransferTo(it); // release block when it closed
       context.read.index_iter.reset(it);
     }
+    //在BlockBasedTable::GetAsyncCallback将 skip_seek 设置为了false
+    //所以这里就会提前seek到指定位置
     if (!context.read.skip_seek) {
       context.read.index_iter_cb = this;
       context.read.index_iter_seek = true;
@@ -2926,6 +2936,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheCallback(
   if (!context.status.ok()) {
     return context.read.async_cb->RetrieveBlockDone(context);
   }
+  //如果前面从缓存中读到了，就会进入该if
   if (context.read.retrieve_block.cache_entry->GetValue() != nullptr) {
     assert(context.status.ok());
     return context.read.async_cb->RetrieveBlockDone(context);
@@ -2938,6 +2949,7 @@ void BlockBasedTable::ReadBlockContentsCallback(AsyncContext &context,
     CachableEntry<TBlocklike>*) const {
   auto block_entry = reinterpret_cast<CachableEntry<TBlocklike>*>(
       context.read.retrieve_block.cache_entry.get());
+  //先放入缓存
   if (context.status.ok()) {
     context.status = PutDataBlockToCache(context.read.key, context.read.ckey,
         rep_->table_options.block_cache.get(), rep_->immortal_table ? nullptr
@@ -2948,6 +2960,9 @@ void BlockBasedTable::ReadBlockContentsCallback(AsyncContext &context,
         GetMemoryAllocator(rep_->table_options), context.read.block_type,
         context.read.getCtx.get());
   }
+  //这里再进入 MaybeReadBlockAndLoadToCacheCallback，和MaybeReadBlockAndLoadToCacheAsync逻辑里面
+  //从cache读到的逻辑一致，反正就是缓存中有了（不管是以前就有还是刚异步读完成加到缓存）
+  //就走MaybeReadBlockAndLoadToCacheCallback
   MaybeReadBlockAndLoadToCacheCallback(context);
 }
 template void BlockBasedTable::ReadBlockContentsCallback<Block>(
@@ -2963,6 +2978,7 @@ template <typename TBlocklike>
 void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
     CachableEntry<TBlocklike>* block_entry, BlockContents* contents) const {
   const bool no_io = (context.options->read_tier == kBlockCacheTier);
+  //block_cache能获取到， block_cache_compressed获取不到
   Cache* block_cache = rep_->table_options.block_cache.get();
   Cache* block_cache_compressed = rep_->immortal_table ? nullptr
       : rep_->table_options.block_cache_compressed.get();
@@ -2977,6 +2993,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
   if (block_cache != nullptr || block_cache_compressed != nullptr) {
     // create key for block cache
     if (block_cache != nullptr) {
+      //拼装cache key （sst文件内的key缓存时会加cache_key_prefix，默认是sst文件的id）
       context.read.key = GetCacheKey(rep_->cache_key_prefix, rep_->cache_key_prefix_size,
           context.read.handle, context.read.cache_key);
     }
@@ -2985,6 +3002,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
           rep_->compressed_cache_key_prefix_size, context.read.handle,
           context.read.compressed_cache_key);
     }
+    //content 传进来为nullptr
     if (!contents) {
       context.status = GetDataBlockFromCache(context.read.key, context.read.ckey, block_cache,
           block_cache_compressed, *context.options, block_entry, *context.read.uncompression_dict,
@@ -3003,6 +3021,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
         }
       }
       if (!contents) {
+        //这里就reset获取new block_fetcher
         if (context.read.block_fetcher) {
           context.read.block_fetcher->reset(this, &context);
         } else {
@@ -3017,6 +3036,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
         context.read.read_contents_no_cache = false;
         return context.read.block_fetcher->ReadBlockContentsAsync();
       } else {
+        //进入这说明调用前已经读到内容了？然后更新Cache（从外层调用的逻辑来看，这个流程走不到）
         if (context.status.ok()) {
           context.status = PutDataBlockToCache(context.read.key, context.read.ckey,
           block_cache, block_cache_compressed, block_entry, contents, contents->get_compression_type(),
@@ -3027,6 +3047,7 @@ void BlockBasedTable::MaybeReadBlockAndLoadToCacheAsync(AsyncContext &context,
       }
     }
   }
+  //从cache中读到了走的逻辑
   MaybeReadBlockAndLoadToCacheCallback(context);
 }
 
@@ -3035,6 +3056,7 @@ void BlockBasedTable::RetrieveBlockAsync(AsyncContext &context,
     CachableEntry<TBlocklike>* block_entry, bool use_cache) const {
   assert(block_entry);
   assert(block_entry->IsEmpty());
+  //use_cache = true
   if (use_cache) {
     MaybeReadBlockAndLoadToCacheAsync(context, block_entry, nullptr);
   } else {
@@ -4242,10 +4264,12 @@ void BlockBasedTable::FullFilterKeysMayMatch(
 
 void BlockBasedTable::GetAsyncCallback(AsyncContext& context) {
   if (!context.read.key_may_match) {
+    //如果布隆过滤器肯定该key不在此sst文件内，直接返回
     RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_USEFUL);
     PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_useful, 1, rep_->level);
     context.read.cfd->table_cache()->GetAsyncCallback(context);
   } else {
+    //认为key可能在该sst文件内，那么就要开始读index了
     RecordTick(rep_->ioptions.statistics, BLOOM_FILTER_FULL_POSITIVE);
     PERF_COUNTER_BY_LEVEL_ADD(bloom_filter_full_positive, 1, rep_->level);
     context.read.skip_seek = false;
@@ -4278,14 +4302,17 @@ void BlockBasedTable::GetAsync(AsyncContext& context) {
   }
 
   auto filter = !context.read.skip_filters ? rep_->filter.get() : nullptr;
+  //是否跳过使用布隆过滤器检查该sst文件，在Version::IterateNextFile赋值 （适用于最底层读优化场景，详间 Version::IsFilterSkipped ） 
+  //默认需要加载filter, 不进if
   if (filter == nullptr || filter->IsBlockBased()) {
     context.read.key_may_match = true;
     GetAsyncCallback(context);
     return;
   }
-
+  //sst的whole_key_filtering为true，memtable为false
   if (rep_->whole_key_filtering) {
     context.read.block_offset = kNotValid;
+    //默认走这里，进入到 FullFilterBlockReader::KeyMayMatchAsync
     filter->KeyMayMatchAsync(context);
   } else {
     // TODO chenxu14 make this async if use prefix bloom filter

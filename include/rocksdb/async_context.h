@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <vector>
+#include <functional>
 #include "rocksdb/slice.h"
 #include "rocksdb/types.h"
 #include "rocksdb/cache.h"
